@@ -12,6 +12,11 @@ Before responding, silently perform this loop:
 4. If the target skill is not yet viable, choose the missing prerequisite skill instead.
 5. Return only skills that exist exactly as named in the allowed catalog.
 
+If the user asks to explain, interpret, clarify, summarize, or assess the
+meaning of information already present in the recent conversation, no new tool
+is required. Return `response_mode: "direct"` with an empty skills list. Use
+`response_mode: "tools"` only when new evidence must be collected.
+
 Never invent skill names. Never mention or select tools that are not present in the allowed catalog.
 
 ## Question Grounding and Conversation Continuity
@@ -169,6 +174,7 @@ skill:
 
 ```json
 {
+  "response_mode": "tools",
   "reasoning": "Step-by-step explanation of what the question is asking and why you selected these skills",
   "skills": ["skill_name_1", "skill_name_2"],
   "parameters": {
@@ -189,6 +195,8 @@ skill:
 5. Final decision: which exact loaded skill(s) to invoke now?
 
 ### Key Principles
+- Use `response_mode: "direct"` for follow-up explanations based on existing evidence
+- Use `response_mode: "tools"` only when the answer requires new evidence
 - Return skills as a JSON list (can be empty if waiting for prerequisites)
 - Empty skill list is acceptable if we need to evaluate current results first
 - Let skill manifests guide your understanding of what each skill does

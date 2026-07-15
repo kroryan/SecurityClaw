@@ -125,3 +125,40 @@ def test_supervisor_prompt_receives_history_and_actual_tool_evidence(monkeypatch
     assert "It exposed port 443" in prompt
     assert '"source.ip": "203.0.113.8"' in prompt
     assert '"destination.port": 443' in prompt
+
+
+def test_decide_node_short_circuits_direct_response_without_plan_review(monkeypatch):
+    monkeypatch.setattr(logic, "_supervisor_next_action", lambda **kwargs: {
+        "response_mode": "direct",
+        "reasoning": "Explain the existing result",
+        "skills": [],
+        "parameters": {"question": kwargs["user_question"]},
+    })
+    monkeypatch.setattr(
+        logic,
+        "_review_and_refine_supervisor_plan",
+        lambda **kwargs: (_ for _ in ()).throw(
+            AssertionError("direct response must not be reviewed")
+        ),
+    )
+    state = {
+        "user_question": "What does that result mean?",
+        "messages": [{"role": "assistant", "content": "Found port 443"}],
+        "skill_results": {},
+        "previously_run_skills": [],
+        "step_count": 0,
+        "max_steps": 4,
+        "evaluation": {},
+        "trace": [],
+    }
+    config = {"configurable": {
+        "available_skills": [],
+        "llm": object(),
+        "instruction": "",
+    }}
+
+    result = logic.decide_node(state, config)
+
+    assert result["response_mode"] == "direct"
+    assert result["skill_plan"] == []
+    assert result["plan_exhausted"] is True

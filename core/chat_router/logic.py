@@ -79,6 +79,7 @@ class AgentState(TypedDict, total=False):
     max_steps: int
     previously_run_skills: list  # list of plan signatures for previously executed steps
     plan_exhausted: bool
+    response_mode: str      # "tools" for investigation, "direct" for conversation
 
     # Evaluation
     evaluation: dict        # {satisfied, confidence, reasoning, missing}
@@ -1330,6 +1331,21 @@ def decide_node(state: AgentState, config: RunnableConfig) -> dict:
         current_results=aggregated_results,
         previous_eval=last_eval,
     )
+    response_mode = str(decision.get("response_mode") or "tools").lower()
+    if response_mode == "direct":
+        decision["skills"] = []
+        if step_callback:
+            step_callback("deciding", decision, step_count, max_steps)
+        return {
+            "skill_plan": [],
+            "step_count": step_count,
+            "pending_parameters": dict(
+                decision.get("parameters") or {"question": state["user_question"]}
+            ),
+            "pending_reasoning": str(decision.get("reasoning", "")),
+            "response_mode": "direct",
+            "plan_exhausted": True,
+        }
     effective_question = str(
         (decision.get("parameters") or {}).get("question") or state["user_question"]
     )
@@ -1552,6 +1568,16 @@ def evaluate_node(state: AgentState, config: RunnableConfig) -> dict:
     even if the next plan is empty. Let the LLM decide satisfaction based on what we have.
     Never force hardcoded "not satisfied" - that prevents proper agentic iteration.
     """
+    if state.get("response_mode") == "direct":
+        return {
+            "evaluation": {
+                "satisfied": True,
+                "confidence": 1.0,
+                "reasoning": "No new evidence is required for this conversational response.",
+                "missing": [],
+            }
+        }
+
     rt = _graph_runtime(config)
     llm = rt["llm"]
     instruction = rt["instruction"]
@@ -1651,6 +1677,7 @@ def format_response_node(state: AgentState, config: RunnableConfig) -> dict:
         cfg,
         available_skills=available_skills,
         token_callback=token_callback if step_callback else None,
+        conversation_history=list(state.get("messages") or []),
     )
 
     return {
@@ -1785,6 +1812,7 @@ def run_graph(
         "step_count": 0,
         "max_steps": max_steps,
         "previously_run_skills": [],
+        "response_mode": "tools",
         "evaluation": {},
         "trace": [],
         "mem_status": "IDLE",
@@ -3185,6 +3213,7 @@ def format_response(
     cfg: Any = None,  # Pass config for anti-hallucination setting
     available_skills: list[dict] | None = None,
     token_callback: Any = None,
+    conversation_history: list[dict] | None = None,
 ) -> str:
     """
     Format skill results into a natural language response with thinking-action-reflection loop.
@@ -3219,6 +3248,8 @@ def format_response(
         )
         direct_user_prompt = (
             f"User question:\n{user_question}\n\n"
+            "Relevant recent conversation:\n"
+            f"{_build_conversation_context(conversation_history)}\n\n"
             "Currently available SecurityClaw skills:\n"
             f"{json.dumps(skill_catalog, indent=2, default=str)}"
         )

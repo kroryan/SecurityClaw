@@ -70,6 +70,7 @@ export default function ChatPage() {
   const streamingMessageIdRef = useRef(null)
   const isNewConversationRef = useRef(false)
   const isStreamingRef = useRef(false)
+  const isSendingRef = useRef(false)
 
   const scrollToMessagesBottom = (behavior = 'auto') => {
     messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' })
@@ -147,7 +148,8 @@ export default function ChatPage() {
   }
 
   const send = async () => {
-    if (!input.trim() || busy) return
+    if (!input.trim() || busy || isSendingRef.current) return
+    isSendingRef.current = true
     const outgoing = input.trim()
     const userTimestamp = new Date().toISOString()
     const assistantMessageId = `${userTimestamp}-assistant`
@@ -282,6 +284,7 @@ export default function ChatPage() {
         },
       })
     } finally {
+      isSendingRef.current = false
       isStreamingRef.current = false
       streamingConversationIdRef.current = null
       streamingMessageIdRef.current = null

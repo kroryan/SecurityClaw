@@ -73,6 +73,9 @@ def test_no_tool_plan_answers_capability_question_instead_of_returning_error():
             {"name": "threat_analyst", "description": "Assess threat reputation"},
         ],
         token_callback=lambda phase, token: events.append((phase, token)),
+        conversation_history=[
+            {"role": "assistant", "content": "The previous scan found port 443."},
+        ],
     )
 
     assert response.startswith("I am SecurityClaw")
@@ -80,3 +83,4 @@ def test_no_tool_plan_answers_capability_question_instead_of_returning_error():
     assert "same language as the user" in llm.messages[0]["content"]
     assert "geoip_lookup" in llm.messages[1]["content"]
     assert "threat_analyst" in llm.messages[1]["content"]
+    assert "The previous scan found port 443" in llm.messages[1]["content"]
