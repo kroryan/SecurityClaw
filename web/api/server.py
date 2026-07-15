@@ -631,7 +631,15 @@ def create_app(*, enable_scheduler: bool = True) -> FastAPI:
                 })
             yield _sse("done", {"conversation_id": conversation_id})
 
-        return StreamingResponse(event_stream(), media_type="text/event-stream")
+        return StreamingResponse(
+            event_stream(),
+            media_type="text/event-stream",
+            headers={
+                "Cache-Control": "no-cache",
+                "Connection": "keep-alive",
+                "X-Accel-Buffering": "no",
+            },
+        )
 
     if DIST_DIR.exists():
         assets_dir = DIST_DIR / "assets"

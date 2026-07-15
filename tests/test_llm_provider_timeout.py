@@ -18,11 +18,18 @@ class _Config:
 
 
 class _Response:
+    status_code = 200
+
     def raise_for_status(self):
         pass
 
     def json(self):
         return {"message": {"content": "ok"}, "embeddings": [[0.1, 0.2]]}
+
+    def iter_lines(self, **kwargs):
+        self.iter_lines_kwargs = kwargs
+        yield '{"message":{"content":"Security"}}'
+        yield '{"message":{"content":"Claw"}}'
 
 
 class _Requests:
@@ -53,3 +60,21 @@ def test_embed_uses_separate_configurable_timeout(monkeypatch):
 
     assert provider.embed("hello") == [0.1, 0.2]
     assert requests.calls[0][1]["timeout"] == (10, 120)
+
+
+def test_stream_chat_forwards_each_ollama_token_without_buffering(monkeypatch):
+    monkeypatch.setattr("core.llm_provider.Config", _Config)
+    provider = OllamaProvider()
+    requests = _Requests()
+    provider._requests = requests
+    tokens = []
+
+    response = provider.stream_chat(
+        [{"role": "user", "content": "hello"}],
+        token_callback=tokens.append,
+    )
+
+    assert response == "SecurityClaw"
+    assert tokens == ["Security", "Claw"]
+    assert requests.calls[0][1]["stream"] is True
+    assert requests.calls[0][1]["timeout"] == (10, 600)

@@ -339,7 +339,7 @@ export default function ChatPage() {
           <div className="border-b border-border px-5 py-3 font-mono text-xs uppercase tracking-[0.18em] text-cyan">Conversation</div>
           <div className="min-h-0 flex-1 space-y-4 overflow-auto p-5">
             {messages.length === 0 ? <div className="font-mono text-dim">Start a new investigation.</div> : null}
-            {messages.filter(m => !m.is_streaming).map((message) => (
+            {messages.map((message) => (
               <div key={message.id || message.timestamp} className={`rounded-xl border p-4 ${message.role === 'assistant' ? 'border-cyan/20 bg-cyan/5' : 'border-border bg-panel2'}`}>
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div className="font-mono text-xs uppercase tracking-[0.18em] text-dim">{message.role === 'assistant' ? 'SecurityClaw' : 'Operator'}</div>
@@ -353,7 +353,14 @@ export default function ChatPage() {
                 ) : null}
                 {message.role === 'assistant' ? (
                   <div className={`markdown text-sm text-text ${message.thought_content ? 'mt-3' : ''}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                    {message.content ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                    ) : message.is_streaming ? (
+                      <span className="font-mono text-xs text-dim">Waiting for response…</span>
+                    ) : null}
+                    {message.is_streaming && message.content ? (
+                      <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-cyan align-middle" aria-label="Streaming response" />
+                    ) : null}
                   </div>
                 ) : (
                   <div className="markdown text-sm text-text">

@@ -57,6 +57,8 @@ def test_chat_stream_forwards_token_events_and_step_events():
 
     body = response.text
     assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-cache"
+    assert response.headers["x-accel-buffering"] == "no"
     assert "event: meta" in body
     assert "event: step" in body
     assert '"kind": "thinking"' in body

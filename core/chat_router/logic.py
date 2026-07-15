@@ -1610,6 +1610,18 @@ def format_response_node(state: AgentState, config: RunnableConfig) -> dict:
     last_eval: dict = state.get("evaluation") or {}
     user_question: str = state["user_question"]
     graph_memory = StateBackedMemory.from_state(state)
+    step_callback = rt.get("step_callback")
+    step_count = int(state.get("step_count") or 0)
+    max_steps = int(state.get("max_steps") or 4)
+
+    def token_callback(phase: str, token: str) -> None:
+        if step_callback:
+            step_callback(
+                "token",
+                {"phase": phase, "token": token},
+                step_count,
+                max_steps,
+            )
 
     # Build final_routing compatible with format_response()
     final_routing = {
@@ -1631,6 +1643,7 @@ def format_response_node(state: AgentState, config: RunnableConfig) -> dict:
         llm,
         cfg,
         available_skills=available_skills,
+        token_callback=token_callback if step_callback else None,
     )
 
     return {
@@ -3109,6 +3122,7 @@ def format_response(
     llm: Any,
     cfg: Any = None,  # Pass config for anti-hallucination setting
     available_skills: list[dict] | None = None,
+    token_callback: Any = None,
 ) -> str:
     """
     Format skill results into a natural language response with thinking-action-reflection loop.
@@ -3276,10 +3290,15 @@ Be specific and concise.
     )
     think_prompt = _render_prompt(think_template, {"USER_QUESTION": user_question})
     
-    think_response = llm.chat([
+    think_response = _chat_response(
+        llm,
+        [
         {"role": "system", "content": "You are a security analyst. Extract structured intent."},
         {"role": "user", "content": think_prompt},
-    ])
+        ],
+        token_callback=token_callback,
+        phase="think",
+    )
     
     # ── PHASE 2: ACTION (already done above) ──────────────────────────────
     # skill_results already contains results from executed skills
@@ -3316,10 +3335,15 @@ Briefly assess coverage in 2-3 sentences.
         },
     )
     
-    reflection_response = llm.chat([
+    reflection_response = _chat_response(
+        llm,
+        [
         {"role": "system", "content": "You are a critical analyst. Assess if results are sufficient."},
         {"role": "user", "content": reflection_prompt},
-    ])
+        ],
+        token_callback=token_callback,
+        phase="reflect",
+    )
     
     # ── PHASE 4: ANTI-HALLUCINATION CHECK ───────────────────────────────────
     # Check if anti-hallucination is enabled in config
@@ -3358,10 +3382,15 @@ Provide only the direct answer.
             },
         )
         
-        final_response = llm.chat([
+        final_response = _chat_response(
+            llm,
+            [
             {"role": "system", "content": "You are a rigorous security analyst. Verify internally but output only clean answers without preamble."},
             {"role": "user", "content": verification_prompt},
-        ])
+            ],
+            token_callback=token_callback,
+            phase="answer",
+        )
     else:
         # Standard response without extra verification
         final_template = _load_prompt_template(
@@ -3385,10 +3414,15 @@ Provide a clear, actionable answer in 2-4 sentences.
             },
         )
         
-        final_response = llm.chat([
+        final_response = _chat_response(
+            llm,
+            [
             {"role": "system", "content": "You are a helpful SOC analyst. Provide clear, actionable insights."},
             {"role": "user", "content": final_prompt},
-        ])
+            ],
+            token_callback=token_callback,
+            phase="answer",
+        )
     
     # ── APPEND THREAT INTEL APIs INFO if threat_analyst was used ──────────────
     threat_analyst_result = skill_results.get("threat_analyst", {})
@@ -3406,6 +3440,23 @@ Provide a clear, actionable answer in 2-4 sentences.
             final_response += f"\n\n_[Threat Intelligence Sources Queried: {apis_str}]_"
     
     return final_response
+
+
+def _chat_response(
+    llm: Any,
+    messages: list[dict],
+    *,
+    token_callback: Any = None,
+    phase: str = "answer",
+) -> str:
+    """Use provider streaming when a request-scoped token callback is available."""
+    stream_chat = getattr(llm, "stream_chat", None)
+    if token_callback and callable(stream_chat):
+        return stream_chat(
+            messages,
+            token_callback=lambda token: token_callback(phase, token),
+        )
+    return llm.chat(messages)
 
 
 def _append_threat_intel_summary(base_response: str, threat_result: dict) -> str:

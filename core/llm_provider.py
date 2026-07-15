@@ -167,7 +167,9 @@ class OllamaProvider(BaseLLMProvider):
             
             line_count = 0
             token_count = 0
-            for line in resp.iter_lines():
+            # Ollama emits one NDJSON object per token. A one-byte read chunk
+            # prevents requests from buffering several token events together.
+            for line in resp.iter_lines(chunk_size=1, decode_unicode=True):
                 line_count += 1
                 if line:
                     try:
