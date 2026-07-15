@@ -88,7 +88,7 @@ export default function ChatPage() {
   const [activityPhraseIndex, setActivityPhraseIndex] = useState(0)
   const [reasoningExpanded, setReasoningExpanded] = useState(false)
   const [agentView, setAgentView] = useState('timeline')
-  const [agentDrawerOpen, setAgentDrawerOpen] = useState(true)
+  const [agentDrawerOpen, setAgentDrawerOpen] = useState(false)
   const [conversationsOpen, setConversationsOpen] = useState(false)
   const activeId = conversationId || null
   
@@ -401,8 +401,8 @@ export default function ChatPage() {
   }, [location.state, navigate])
 
   return (
-    <div className="flex h-full min-h-0 gap-6">
-      {conversationsOpen ? <div className="panel flex w-80 flex-col overflow-hidden">
+    <div className="relative flex h-full min-h-0 overflow-hidden">
+      {conversationsOpen ? <div className="panel absolute inset-y-0 left-0 z-30 flex w-80 flex-col overflow-hidden shadow-2xl">
         <div className="border-b border-border p-4">
           <button className="btn btn-primary w-full" onClick={newChat}>
             <Plus className="h-4 w-4" /> New Chat
@@ -427,22 +427,20 @@ export default function ChatPage() {
         </div>
       </div> : null}
 
-      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden">
-        <div className="panel flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="flex items-center justify-between border-b border-border px-4 py-3">
-            <div><div className="font-mono text-xs uppercase tracking-[0.18em] text-cyan">Investigation Graph</div><div className="mt-1 text-xs text-dim">Evidence appears as each tool completes.</div></div>
-            <div className="flex gap-2">
-              <button className={`btn ${conversationsOpen ? 'btn-primary' : ''}`} onClick={() => setConversationsOpen((value) => !value)}><History className="h-4 w-4" /> History</button>
-              <button className={`btn ${agentDrawerOpen ? 'btn-primary' : ''}`} onClick={() => setAgentDrawerOpen((value) => !value)}>{agentDrawerOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />} Agent</button>
-            </div>
-          </div>
+      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#070d18]">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
           <Suspense fallback={<div className="p-6 text-sm text-dim">Loading evidence graph…</div>}><EvidenceGraph skillResults={liveEvidenceResults} storageKey={activeId || 'new'} /></Suspense>
+        </div>
+
+        <div className="absolute bottom-4 right-4 z-10 flex gap-2">
+          <button className={`btn shadow-xl ${conversationsOpen ? 'btn-primary' : ''}`} onClick={() => setConversationsOpen((value) => !value)}><History className="h-4 w-4" /> History</button>
+          <button className={`btn shadow-xl ${agentDrawerOpen ? 'btn-primary' : ''}`} onClick={() => setAgentDrawerOpen((value) => !value)}>{agentDrawerOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />} Chat</button>
         </div>
 
         {agentDrawerOpen ? <div className="absolute inset-y-0 right-0 z-20 flex w-[min(720px,96%)] min-w-0 flex-col border-l border-border bg-panel shadow-2xl">
           <div className="flex items-center justify-between border-b border-border px-5 py-3">
             <div>
-              <div className="font-mono text-xs uppercase tracking-[0.18em] text-cyan">SecurityClaw Agent</div>
+              <div className="font-mono text-xs uppercase tracking-[0.18em] text-cyan">SecurityClaw Agent Chat</div>
               <div className="mt-1 text-xs text-dim">ReAct investigation console · operator-guided · approval-gated actions</div>
             </div>
             <div className="flex gap-2">

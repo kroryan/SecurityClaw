@@ -72,6 +72,7 @@ export default function EvidenceGraph({ skillResults = {}, storageKey = 'current
   const graphRef = useRef()
   const wrapperRef = useRef()
   const previousNodeCountRef = useRef(0)
+  const stableGraphRef = useRef({ signature: '', graph: { nodes: [], links: [] } })
   const [mode3d, setMode3d] = useState(false)
   const [labels, setLabels] = useState(false)
   const [query, setQuery] = useState('')
@@ -94,8 +95,38 @@ export default function EvidenceGraph({ skillResults = {}, storageKey = 'current
     return () => observer.disconnect()
   }, [])
   useEffect(() => { localStorage.setItem(annotationKey, JSON.stringify(annotations)) }, [annotationKey, annotations])
+  useEffect(() => {
+    stableGraphRef.current = { signature: '', graph: { nodes: [], links: [] } }
+    previousNodeCountRef.current = 0
+    setSelected(null)
+    try { setAnnotations(JSON.parse(localStorage.getItem(annotationKey) || '{}')) } catch { setAnnotations({}) }
+  }, [annotationKey])
 
-  const fullGraph = useMemo(() => buildEvidenceGraph(skillResults, annotations), [skillResults, annotations])
+  const evidenceSignature = JSON.stringify({ skillResults, annotations })
+  const fullGraph = useMemo(() => {
+    if (stableGraphRef.current.signature === evidenceSignature) return stableGraphRef.current.graph
+    const next = buildEvidenceGraph(skillResults, annotations)
+    const previousNodes = new Map(stableGraphRef.current.graph.nodes.map((node) => [node.id, node]))
+    next.nodes = next.nodes.map((node) => {
+      const previous = previousNodes.get(node.id)
+      if (!previous) return node
+      return {
+        ...previous,
+        ...node,
+        x: previous.x,
+        y: previous.y,
+        z: previous.z,
+        vx: previous.vx,
+        vy: previous.vy,
+        vz: previous.vz,
+        fx: previous.fx,
+        fy: previous.fy,
+        fz: previous.fz,
+      }
+    })
+    stableGraphRef.current = { signature: evidenceSignature, graph: next }
+    return next
+  }, [evidenceSignature])
   const types = useMemo(() => [...new Set(fullGraph.nodes.map((node) => node.type))].sort(), [fullGraph])
   const graph = useMemo(() => {
     const needle = query.trim().toLowerCase()
@@ -104,7 +135,7 @@ export default function EvidenceGraph({ skillResults = {}, storageKey = 'current
     const nodes = fullGraph.nodes.filter((node) => visible.has(node.id)).map((node) => ({ ...node }))
     const links = fullGraph.links.filter((link) => visible.has(typeof link.source === 'object' ? link.source.id : link.source) && visible.has(typeof link.target === 'object' ? link.target.id : link.target)).map((link) => ({ ...link, source: typeof link.source === 'object' ? link.source.id : link.source, target: typeof link.target === 'object' ? link.target.id : link.target }))
     return { nodes, links }
-  }, [fullGraph, query, typeFilter, mode3d])
+  }, [fullGraph, query, typeFilter])
 
   useEffect(() => {
     const firstEvidence = previousNodeCountRef.current <= 1 && graph.nodes.length > 1
@@ -169,7 +200,7 @@ export default function EvidenceGraph({ skillResults = {}, storageKey = 'current
           <button className="btn" onClick={exportGraph}><Download className="h-4 w-4" /> JSON</button>
         </div>
         <div ref={wrapperRef} className="min-h-[520px] flex-1 overflow-hidden">
-          {mode3d ? <Suspense fallback={<div className="p-6 text-sm text-dim">Loading 3D renderer…</div>}><ForceGraph3D key="3d" {...common} nodeLabel={nodeLabel} onEngineStop={() => { const controls = graphRef.current?.controls?.(); if (controls) controls.autoRotate = false }} /></Suspense> : <ForceGraph2D key="2d" {...common} nodeCanvasObjectMode={() => (labels || graph.nodes.length <= 24) ? 'after' : undefined} nodeCanvasObject={(node, context, scale) => { if (!labels && graph.nodes.length > 24 && selected?.id !== node.id) return; context.font = `${Math.max(10 / scale, 2)}px sans-serif`; context.fillStyle = '#cbd5e1'; context.textAlign = 'center'; context.fillText(node.name.slice(0, 34), node.x, node.y + 8) }} />}
+          {mode3d ? <Suspense fallback={<div className="p-6 text-sm text-dim">Loading 3D renderer…</div>}><ForceGraph3D {...common} nodeLabel={nodeLabel} onEngineStop={() => { const controls = graphRef.current?.controls?.(); if (controls) controls.autoRotate = false }} /></Suspense> : <ForceGraph2D {...common} nodeCanvasObjectMode={() => 'after'} nodeCanvasObject={(node, context, scale) => { if (!labels && graph.nodes.length > 24 && selected?.id !== node.id) return; context.font = `${Math.max(10 / scale, 2)}px sans-serif`; context.fillStyle = '#cbd5e1'; context.textAlign = 'center'; context.fillText(node.name.slice(0, 34), node.x, node.y + 8) }} />}
         </div>
       </div>
       {detailsOpen ? <aside className="w-80 shrink-0 overflow-auto border-l border-border bg-panel2 p-4">

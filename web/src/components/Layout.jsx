@@ -5,7 +5,7 @@ import { useEffect, useState } from 'react'
 
 const links = [
   { to: '/status', label: 'STATUS', icon: Activity },
-  { to: '/agent', label: 'AGENT', icon: Bot },
+  { to: '/agent', label: 'GRAPH', icon: Bot },
   { to: '/alerts', label: 'ALERTS', icon: BellRing },
   { to: '/skills', label: 'SKILLS', icon: Cpu },
   { to: '/config', label: 'CONFIG', icon: Settings },
@@ -82,7 +82,7 @@ export default function Layout({ children }) {
             <div className="badge badge-green">online</div>
           </header>
         ) : null}
-        <div className={`min-h-0 flex-1 overflow-auto ${isChatRoute ? 'p-3' : 'p-6'}`}>{children}</div>
+        <div className={`min-h-0 flex-1 ${isChatRoute ? 'overflow-hidden' : 'overflow-auto p-6'}`}>{children}</div>
       </div>
     </div>
   )
