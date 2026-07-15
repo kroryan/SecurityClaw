@@ -77,6 +77,16 @@ class OllamaProvider(BaseLLMProvider):
         self.embed_model = cfg.get("llm", "ollama_embed_model", default=self.model)
         self.temperature = cfg.get("llm", "temperature", default=0.2)
         self.max_tokens = cfg.get("llm", "max_tokens", default=16384)
+        self.think = cfg.get("llm", "think", default=False)
+        # Generation on local hardware can legitimately take several minutes.
+        # Keep the connection timeout short while allowing a configurable read
+        # timeout for the model response.
+        self.request_timeout_seconds = cfg.get(
+            "llm", "request_timeout_seconds", default=600
+        )
+        self.embedding_timeout_seconds = cfg.get(
+            "llm", "embedding_timeout_seconds", default=120
+        )
         self._embedding_dim: Optional[int] = None  # Cache embedding dimension
 
     def chat(
@@ -91,6 +101,7 @@ class OllamaProvider(BaseLLMProvider):
             "model": self.model,
             "messages": messages,
             "stream": False,
+            "think": self.think,
             "options": {
                 "temperature": temperature or self.temperature,
                 "num_predict": max_tokens or self.max_tokens,
@@ -103,7 +114,7 @@ class OllamaProvider(BaseLLMProvider):
             resp = self._requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
-                timeout=120,
+                timeout=(10, self.request_timeout_seconds),
             )
             resp.raise_for_status()
             return resp.json()["message"]["content"]
@@ -135,6 +146,7 @@ class OllamaProvider(BaseLLMProvider):
             "model": self.model,
             "messages": messages,
             "stream": True,
+            "think": self.think,
             "options": {
                 "temperature": temperature or self.temperature,
                 "num_predict": max_tokens or self.max_tokens,
@@ -147,7 +159,7 @@ class OllamaProvider(BaseLLMProvider):
             resp = self._requests.post(
                 f"{self.base_url}/api/chat",
                 json=payload,
-                timeout=120,
+                timeout=(10, self.request_timeout_seconds),
                 stream=True,
             )
             resp.raise_for_status()
@@ -186,7 +198,7 @@ class OllamaProvider(BaseLLMProvider):
             resp = self._requests.post(
                 f"{self.base_url}/api/embed",
                 json=payload,
-                timeout=60,
+                timeout=(10, self.embedding_timeout_seconds),
             )
             resp.raise_for_status()
             data = resp.json()
