@@ -3359,8 +3359,9 @@ def format_response(
             "interpretation, explain severity and practical impact, identify coverage gaps, and provide prioritized "
             "next actions. Do not call a host safe merely because no indicator was found. Do not expose internal "
             "planning or raw tool names, and do not make unsupported conclusions. Use clear headings and enough "
-            "detail for an operator to act. If an observation has status `approval_required`, reproduce its exact "
-            "confirmation string and explain that no action has executed yet. Reply in the user's language."
+            "detail for an operator to act. If an observation has status `approval_required`, state only that the "
+            "action is pending in the operator approval interface and has not executed; never reproduce its token "
+            "or ask for approval in chat. Reply in the user's language."
         )
         return _chat_response(
             llm,

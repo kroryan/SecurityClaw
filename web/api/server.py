@@ -23,6 +23,8 @@ from pydantic import BaseModel
 
 from core.config import Config
 from core.alert_store import alert_store
+from core.action_authorization import revoke_authorization
+from core.graph_enrichment import enrich_graph_nodes
 from core.skill_manifest import manifest_supports_current_platform
 from core.skill_onboarding import discover_skill_requirements, get_missing_skill_variables
 from core.chat_router.logic import (
@@ -45,6 +47,39 @@ SKILLS_DIR = ROOT / "skills"
 load_dotenv(ENV_PATH)
 
 SECRET_NAME_RE = re.compile(r"(password|secret|token|api[_-]?key|client[_-]?secret|license[_-]?key)", re.IGNORECASE)
+
+CONFIG_FIELD_DEFINITIONS = [
+    {"path": "agent.log_level", "section": "Agent", "label": "Log level", "type": "select", "options": ["DEBUG", "INFO", "WARNING", "ERROR"], "default": "INFO", "description": "Runtime logging detail."},
+    {"path": "scheduler.heartbeat_interval_seconds", "section": "Agent", "label": "Heartbeat interval", "type": "number", "min": 10, "default": 60, "description": "Seconds between scheduler heartbeat checks."},
+    {"path": "db.provider", "section": "Data source", "label": "Search provider", "type": "select", "options": ["opensearch", "elasticsearch"], "default": "opensearch"},
+    {"path": "db.host", "section": "Data source", "label": "Host", "type": "text", "default": "localhost"},
+    {"path": "db.port", "section": "Data source", "label": "Port", "type": "number", "min": 1, "max": 65535, "default": 9200},
+    {"path": "db.logs_index", "section": "Data source", "label": "Logs index", "type": "text", "default": "logstash-*"},
+    {"path": "db.use_ssl", "section": "Data source", "label": "Use TLS", "type": "boolean", "default": False},
+    {"path": "db.verify_certs", "section": "Data source", "label": "Verify certificates", "type": "boolean", "default": False},
+    {"path": "llm.provider", "section": "Language model", "label": "Provider", "type": "select", "options": ["ollama", "openai", "chatgpt", "openai_compatible", "anthropic", "claude_api", "codex_cli", "claude_cli"], "default": "ollama", "description": "Credentials and remote endpoints remain in .env."},
+    {"path": "llm.ollama_base_url", "section": "Language model", "label": "Ollama URL", "type": "text", "providers": ["ollama"], "default": "http://localhost:11434"},
+    {"path": "llm.ollama_model", "section": "Language model", "label": "Ollama chat model", "type": "text", "providers": ["ollama"], "default": "llama3"},
+    {"path": "llm.ollama_embed_model", "section": "Language model", "label": "Embedding model", "type": "text", "default": "nomic-embed-text:latest", "description": "Local embedding model used for RAG."},
+    {"path": "llm.temperature", "section": "Language model", "label": "Temperature", "type": "number", "min": 0, "max": 2, "step": 0.1, "default": 0.2},
+    {"path": "llm.think", "section": "Language model", "label": "Model thinking mode", "type": "boolean", "providers": ["ollama"], "default": False},
+    {"path": "llm.max_tokens", "section": "Language model", "label": "Maximum response tokens", "type": "number", "min": 128, "default": 4096},
+    {"path": "llm.context_window", "section": "Language model", "label": "Context window", "type": "number", "min": 1024, "default": 16384},
+    {"path": "llm.request_timeout_seconds", "section": "Language model", "label": "Response timeout", "type": "number", "min": 30, "default": 600, "description": "Maximum generation time in seconds."},
+    {"path": "llm.embedding_timeout_seconds", "section": "Language model", "label": "Embedding timeout", "type": "number", "min": 10, "default": 120},
+    {"path": "chat.supervisor_max_steps", "section": "Agent orchestration", "label": "Maximum investigation steps", "type": "number", "min": 1, "max": 8, "default": 6, "description": "Upper bound for think, tool, observation, and refinement cycles in one operator turn."},
+    {"path": "rag.top_k", "section": "Retrieval", "label": "Retrieved context items", "type": "number", "min": 1, "max": 50, "default": 5},
+    {"path": "rag.similarity_threshold", "section": "Retrieval", "label": "Similarity threshold", "type": "number", "min": 0, "max": 1, "step": 0.05, "default": 0.65},
+    {"path": "anomaly.poll_interval_seconds", "section": "Passive detection", "label": "Anomaly polling interval", "type": "number", "min": 10, "default": 60},
+    {"path": "anomaly.severity_threshold", "section": "Passive detection", "label": "Minimum anomaly severity", "type": "number", "min": 0, "max": 1, "step": 0.05, "default": 0.7},
+    {"path": "anomaly.max_findings_per_poll", "section": "Passive detection", "label": "Findings per cycle", "type": "number", "min": 1, "max": 1000, "default": 50},
+    {"path": "endpoint.owned_service_ports", "section": "Passive detection", "label": "SecurityClaw-owned ports", "type": "ports", "default": [7799], "description": "Comma-separated local ports excluded from endpoint connection alerts. Configured database and local LLM ports are added automatically."},
+    {"path": "geoip.enabled", "section": "GeoIP", "label": "Enable GeoIP", "type": "boolean", "default": True},
+    {"path": "geoip.provider", "section": "GeoIP", "label": "Provider", "type": "select", "options": ["auto", "maxmind", "ipinfo"], "default": "auto"},
+    {"path": "graph_enrichment.enabled", "section": "Graph enrichment", "label": "Generate node analysis", "type": "boolean", "default": True, "description": "Create concise descriptions from collected evidence and configured security intelligence."},
+    {"path": "graph_enrichment.duckduckgo_fallback", "section": "Graph enrichment", "label": "Allow web fallback", "type": "boolean", "default": True, "description": "Use DuckDuckGo Instant Answers only when specialist security sources have no useful context."},
+    {"path": "graph_enrichment.external_timeout_seconds", "section": "Graph enrichment", "label": "External lookup timeout", "type": "number", "min": 2, "max": 30, "default": 6},
+]
 
 
 # ──────────────────────────────────────────────────────────────────────────────
@@ -126,6 +161,59 @@ def _read_text(path: Path, default: str = "") -> str:
     return path.read_text(encoding="utf-8") if path.exists() else default
 
 
+def _nested_value(data: dict[str, Any], path: str, default: Any = None) -> Any:
+    value: Any = data
+    for key in path.split("."):
+        if not isinstance(value, dict):
+            return default
+        value = value.get(key, default)
+    return value
+
+
+def _set_nested_value(data: dict[str, Any], path: str, value: Any) -> None:
+    keys = path.split(".")
+    target = data
+    for key in keys[:-1]:
+        target = target.setdefault(key, {})
+    target[keys[-1]] = value
+
+
+def _config_fields_payload() -> list[dict[str, Any]]:
+    current = yaml.safe_load(_read_text(CONFIG_PATH, "{}")) or {}
+    return [{**field, "value": _nested_value(current, field["path"], field.get("default", ""))} for field in CONFIG_FIELD_DEFINITIONS]
+
+
+def _normalize_config_value(definition: dict[str, Any], value: Any) -> Any:
+    field_type = definition["type"]
+    if field_type == "ports":
+        candidates = value if isinstance(value, list) else re.split(r"[\s,]+", str(value).strip())
+        ports = sorted({int(item) for item in candidates if str(item).strip()})
+        if any(port < 1 or port > 65535 for port in ports):
+            raise ValueError("invalid port")
+        return ports
+    if field_type == "boolean":
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, str) and value.strip().lower() in {"true", "1", "yes", "on"}:
+            return True
+        if isinstance(value, str) and value.strip().lower() in {"false", "0", "no", "off"}:
+            return False
+        raise ValueError("invalid boolean")
+    if field_type == "number":
+        normalized = float(value) if isinstance(value, str) and "." in value else int(value)
+        if "min" in definition and normalized < definition["min"]:
+            raise ValueError("below minimum")
+        if "max" in definition and normalized > definition["max"]:
+            raise ValueError("above maximum")
+        return normalized
+    if field_type == "select":
+        normalized = str(value)
+        if normalized not in definition.get("options", []):
+            raise ValueError("invalid option")
+        return normalized
+    return str(value).strip()
+
+
 def _short_json(payload: dict, limit: int = 1200) -> str:
     rendered = json.dumps(payload, indent=2, default=str)
     if len(rendered) <= limit:
@@ -187,8 +275,29 @@ class SaveConfigRequest(BaseModel):
     content: str
 
 
+class SaveConfigSettingsRequest(BaseModel):
+    values: dict[str, Any]
+
+
 class SaveEnvRequest(BaseModel):
     values: dict[str, str]
+
+
+class GraphEnrichmentRequest(BaseModel):
+    nodes: list[dict[str, Any]]
+
+
+class ActionApprovalRequest(BaseModel):
+    conversation_id: str
+    skill: str
+    action: str
+    arguments: dict[str, Any]
+    authorization_token: str
+
+
+class ActionDenialRequest(BaseModel):
+    conversation_id: str
+    authorization_token: str
 
 
 class RestartRequest(BaseModel):
@@ -358,6 +467,7 @@ def _env_payload() -> dict[str, Any]:
         "TALOS_CLIENT_ID",
         "TALOS_CLIENT_SECRET",
         "MAXMIND_LICENSE_KEY",
+        "IPINFO_TOKEN",
     ]:
         raw.setdefault(key, "")
 
@@ -553,6 +663,7 @@ def create_app(*, enable_scheduler: bool = True) -> FastAPI:
     async def config() -> dict[str, Any]:
         return {
             "config_raw": _read_text(CONFIG_PATH, ""),
+            "config_fields": _config_fields_payload(),
             "env": _env_payload(),
             "required_env_vars": discover_skill_requirements(),
             "missing_skill_vars": get_missing_skill_variables(),
@@ -567,11 +678,94 @@ def create_app(*, enable_scheduler: bool = True) -> FastAPI:
         app.state.service.restart()
         return {"status": "ok"}
 
+    @app.put("/api/config/settings")
+    async def save_config_settings(body: SaveConfigSettingsRequest) -> dict[str, str]:
+        definitions = {field["path"]: field for field in CONFIG_FIELD_DEFINITIONS}
+        unknown = sorted(set(body.values) - set(definitions))
+        if unknown:
+            raise HTTPException(status_code=400, detail=f"Unsupported configuration fields: {', '.join(unknown)}")
+        current = yaml.safe_load(_read_text(CONFIG_PATH, "{}")) or {}
+        if not isinstance(current, dict):
+            raise HTTPException(status_code=400, detail="config.yaml must contain a mapping")
+        for path, value in body.values.items():
+            definition = definitions[path]
+            try:
+                normalized = _normalize_config_value(definition, value)
+            except (TypeError, ValueError) as exc:
+                raise HTTPException(status_code=400, detail=f"Invalid value for {path}") from exc
+            _set_nested_value(current, path, normalized)
+        CONFIG_PATH.write_text(yaml.safe_dump(current, sort_keys=False), encoding="utf-8")
+        Config.reset()
+        app.state.service.restart()
+        return {"status": "ok"}
+
     @app.put("/api/env")
     async def save_env(body: SaveEnvRequest) -> dict[str, str]:
         _write_env(body.values)
         app.state.service.restart()
         return {"status": "ok"}
+
+    @app.post("/api/graph/enrich")
+    async def enrich_graph(body: GraphEnrichmentRequest) -> dict[str, Any]:
+        if len(body.nodes) > 20:
+            raise HTTPException(status_code=400, detail="A maximum of 20 graph nodes can be enriched per request")
+        context = app.state.service.context
+        enrichments = await asyncio.to_thread(
+            enrich_graph_nodes,
+            body.nodes,
+            llm=context.llm,
+            cfg=context.cfg,
+        )
+        return {"items": enrichments}
+
+    @app.post("/api/actions/approve")
+    async def approve_action(body: ActionApprovalRequest) -> dict[str, Any]:
+        """Execute one token-bound endpoint action after an explicit UI approval."""
+        _validate_conversation_id(body.conversation_id)
+        _validate_skill_name(body.skill)
+        context = app.state.service.context
+        skill = context.runner._skills.get(body.skill)
+        manifest = skill.metadata.get("manifest", {}) if skill else {}
+        if not skill or manifest.get("risk_level") != "privileged_approval_required":
+            raise HTTPException(status_code=400, detail="The selected skill is not an approval-gated action capability")
+        runner_context = context.runner._build_context()
+        runner_context.update({
+            "parameters": {
+                "action": body.action,
+                **body.arguments,
+                "authorization_token": body.authorization_token,
+            },
+            "operator_message": f"AUTHORIZE {body.authorization_token}",
+        })
+        try:
+            # Approval-gated actions are deliberately executed in the request
+            # lifecycle so completion is unambiguous and no detached worker can
+            # outlive or replay a single-use authorization token.
+            result = context.runner.dispatch(body.skill, runner_context)
+        except (KeyError, RuntimeError, ValueError) as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not isinstance(result, dict) or result.get("status") != "ok":
+            raise HTTPException(status_code=409, detail="Authorization is invalid, expired, or does not match this action")
+
+        add_user_message_to_history(body.conversation_id, f"Approved defensive action: {body.action}")
+        add_assistant_message_to_history(
+            body.conversation_id,
+            f"The approved defensive action `{body.action}` completed successfully.",
+            {"skills": [body.skill], "reasoning": "Explicit operator approval received through the action gate."},
+            {body.skill: result},
+        )
+        return {"status": "ok", "result": result}
+
+    @app.post("/api/actions/deny")
+    async def deny_action(body: ActionDenialRequest) -> dict[str, Any]:
+        _validate_conversation_id(body.conversation_id)
+        revoked = revoke_authorization(body.authorization_token)
+        add_user_message_to_history(body.conversation_id, "Denied pending defensive action")
+        add_assistant_message_to_history(
+            body.conversation_id,
+            "The pending defensive action was denied and its authorization was invalidated.",
+        )
+        return {"status": "ok", "revoked": revoked}
 
     @app.get("/api/crons")
     async def crons() -> dict[str, Any]:
@@ -796,6 +990,7 @@ app = create_app(enable_scheduler=os.getenv("SECURITYCLAW_API_ONLY") != "1")
 
 def run_service(host: str = "0.0.0.0", port: int = 7799, enable_scheduler: bool = True) -> None:
     os.environ["SECURITYCLAW_API_ONLY"] = "0" if enable_scheduler else "1"
+    os.environ["SECURITYCLAW_API_PORT"] = str(port)
     uvicorn.run(
         create_app(enable_scheduler=enable_scheduler),
         host=host,

@@ -12,6 +12,7 @@ from core.endpoint_security import (
     collect_persistence,
     collect_processes,
     collect_security_posture,
+    filter_securityclaw_connections,
 )
 
 STATE_PATH = Path("data/endpoint_threat_hunter_state.json")
@@ -38,13 +39,17 @@ def _save(snapshot: dict) -> None:
 def run(context: dict) -> dict:
     processes = collect_processes(limit=1000)
     network = collect_network_connections(limit=1000)
+    visible_connections, excluded_connections, owned_ports = filter_securityclaw_connections(
+        network.get("connections") or [],
+        context.get("config"),
+    )
     persistence = collect_persistence(limit=1000)
     integrity = collect_file_integrity(max_files=2000)
     posture = collect_security_posture(limit=1000)
     snapshot = {
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "processes": processes.get("processes") or [],
-        "connections": network.get("connections") or [],
+        "connections": visible_connections,
         "persistence": persistence.get("persistence") or [],
         "files": integrity.get("files") or [],
         "checks": posture.get("checks") or {},
@@ -58,6 +63,8 @@ def run(context: dict) -> dict:
             "findings": [],
             "finding_count": 0,
             "coverage": ["processes", "network_connections", "persistence", "file_integrity", "security_posture"],
+            "excluded_own_connection_count": len(excluded_connections),
+            "excluded_owned_ports": sorted(owned_ports),
             "baseline_counts": {key: len(value) for key, value in snapshot.items() if isinstance(value, list)},
         }
 
@@ -89,4 +96,4 @@ def run(context: dict) -> dict:
         except Exception as exc:
             llm_analysis = f"LLM analysis unavailable: {exc}"
     _save(snapshot)
-    return {"status": "ok", "timestamp": snapshot["timestamp"], "findings": findings, "finding_count": sum(item["count"] for item in findings), "analysis": llm_analysis, "coverage": ["processes", "network_connections", "persistence", "file_integrity", "security_posture"]}
+    return {"status": "ok", "timestamp": snapshot["timestamp"], "findings": findings, "finding_count": sum(item["count"] for item in findings), "analysis": llm_analysis, "coverage": ["processes", "network_connections", "persistence", "file_integrity", "security_posture"], "excluded_own_connection_count": len(excluded_connections), "excluded_owned_ports": sorted(owned_ports)}

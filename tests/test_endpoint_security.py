@@ -1,6 +1,7 @@
 from pathlib import Path
 
 from core import endpoint_security
+from core.action_authorization import consume_authorization, request_authorization, revoke_authorization
 from core.chat_router.logic import _build_skill_catalog
 from core.skill_loader import SkillLoader
 import core.skill_loader as skill_loader_module
@@ -183,6 +184,20 @@ def test_endpoint_action_rejects_token_not_echoed_by_current_operator(monkeypatc
     assert retry["status"] == "approval_required"
 
 
+def test_denied_authorization_cannot_be_reused():
+    arguments = {"pid": 4343}
+    token = request_authorization("terminate_process", arguments)
+
+    assert revoke_authorization(token) is True
+    assert revoke_authorization(token) is False
+    assert consume_authorization(
+        token,
+        "terminate_process",
+        arguments,
+        f"AUTHORIZE {token}",
+    ) is False
+
+
 def test_neighbor_eviction_requires_operator_authorization(monkeypatch):
     monkeypatch.setattr(endpoint_response, "platform_name", lambda: "linux")
     executed = []
@@ -261,3 +276,29 @@ def test_vulnerability_severity_calculates_cvss_vector_without_guessing():
 
 def test_vulnerability_severity_is_unknown_when_advisory_has_no_rating():
     assert endpoint_security.classify_vulnerability_severity({}) == (None, "unknown", "not_provided")
+
+
+def test_securityclaw_owned_ports_are_excluded_from_local_connection_detection(monkeypatch):
+    class _Config:
+        values = {
+            ("endpoint", "owned_service_ports"): [7799, 8443],
+            ("db", "port"): 9200,
+            ("llm", "ollama_base_url"): "http://localhost:11434",
+        }
+
+        def get(self, section, key, default=None):
+            return self.values.get((section, key), default)
+
+    monkeypatch.delenv("SECURITYCLAW_API_PORT", raising=False)
+    config = _Config()
+    assert endpoint_security.securityclaw_owned_ports(config) == {7799, 8443, 9200, 11434}
+    visible, excluded, ports = endpoint_security.filter_securityclaw_connections([
+        {"local": "0.0.0.0:7799", "remote": "0.0.0.0:*"},
+        {"local": "127.0.0.1:40100", "remote": "127.0.0.1:11434"},
+        {"LocalAddress": "0.0.0.0", "LocalPort": 9200, "RemoteAddress": "0.0.0.0", "RemotePort": 0},
+        {"local": "10.0.0.5:51000", "remote": "1.1.1.1:443"},
+    ], config)
+
+    assert ports == {7799, 8443, 9200, 11434}
+    assert visible == [{"local": "10.0.0.5:51000", "remote": "1.1.1.1:443"}]
+    assert len(excluded) == 3

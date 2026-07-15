@@ -21,7 +21,8 @@
     "react-router-dom": "^6.30.0",
     "recharts": "^3.9.2",
     "remark-gfm": "^4.0.1",
-    "three": "0.185.1"
+    "three": "0.185.1",
+    "three-spritetext": "1.10.0"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",

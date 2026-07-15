@@ -14,6 +14,7 @@ import re
 import math
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import requests
 
@@ -119,6 +120,87 @@ def collect_network_connections(limit: int = 500) -> dict[str, Any]:
         parsed = json.loads(raw or "[]")
         connections = parsed if isinstance(parsed, list) else [parsed]
     return {"status": "ok", "platform": platform_name(), "count": len(connections), "connections": connections}
+
+
+def securityclaw_owned_ports(config: Any = None) -> set[int]:
+    """Return local ports used by SecurityClaw and its configured dependencies."""
+    if config is None:
+        from core.config import Config
+        config = Config()
+
+    def cfg_get(section: str, key: str, default: Any = None) -> Any:
+        try:
+            return config.get(section, key, default=default)
+        except TypeError:
+            return config.get(section, key, default)
+
+    ports: set[int] = {7799}
+    configured = cfg_get("endpoint", "owned_service_ports", default=[])
+    if isinstance(configured, str):
+        configured = re.split(r"[\s,]+", configured.strip())
+    for value in configured if isinstance(configured, (list, tuple, set)) else []:
+        try:
+            port = int(value)
+            if 1 <= port <= 65535:
+                ports.add(port)
+        except (TypeError, ValueError):
+            continue
+
+    for value in (
+        cfg_get("service", "port", default=None),
+        cfg_get("web", "port", default=None),
+        cfg_get("db", "port", default=None),
+        os.getenv("SECURITYCLAW_API_PORT"),
+    ):
+        try:
+            port = int(value)
+            if 1 <= port <= 65535:
+                ports.add(port)
+        except (TypeError, ValueError):
+            continue
+
+    for value in (
+        cfg_get("llm", "ollama_base_url", default=None),
+        os.getenv("OLLAMA_BASE_URL"),
+        os.getenv("OPENAI_BASE_URL"),
+        os.getenv("ANTHROPIC_BASE_URL"),
+    ):
+        if not value:
+            continue
+        try:
+            parsed = urlparse(str(value))
+            if parsed.hostname in {"localhost", "127.0.0.1", "::1", "0.0.0.0"} and parsed.port:
+                ports.add(parsed.port)
+        except ValueError:
+            continue
+    return ports
+
+
+def _connection_port(connection: dict[str, Any], side: str) -> int | None:
+    direct = connection.get("LocalPort" if side == "local" else "RemotePort")
+    if direct is not None:
+        try:
+            return int(direct)
+        except (TypeError, ValueError):
+            return None
+    endpoint = connection.get(side)
+    if not isinstance(endpoint, str):
+        return None
+    match = re.search(r":(\d+)$", endpoint.strip())
+    return int(match.group(1)) if match else None
+
+
+def filter_securityclaw_connections(connections: list[dict[str, Any]], config: Any = None) -> tuple[list[dict[str, Any]], list[dict[str, Any]], set[int]]:
+    """Remove SecurityClaw's own service traffic from local threat detection."""
+    owned_ports = securityclaw_owned_ports(config)
+    visible: list[dict[str, Any]] = []
+    excluded: list[dict[str, Any]] = []
+    for connection in connections:
+        if _connection_port(connection, "local") in owned_ports or _connection_port(connection, "remote") in owned_ports:
+            excluded.append(connection)
+        else:
+            visible.append(connection)
+    return visible, excluded, owned_ports
 
 
 def collect_network_defense(limit: int = 1000) -> dict[str, Any]:

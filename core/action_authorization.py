@@ -34,6 +34,12 @@ def request_authorization(action: str, arguments: dict[str, Any]) -> str:
     return token
 
 
+def revoke_authorization(token: str) -> bool:
+    """Invalidate a pending request after an explicit operator denial."""
+    with _LOCK:
+        return _REQUESTS.pop(str(token or ""), None) is not None
+
+
 def consume_authorization(
     token: str,
     action: str,

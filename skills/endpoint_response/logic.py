@@ -100,7 +100,7 @@ def run(context: dict) -> dict:
             "authorization_token": token,
             "expires_in_seconds": 600,
             "confirmation": f"AUTHORIZE {token}",
-            "message": "Echo the confirmation exactly in a new operator message to execute this action.",
+            "message": "This action is pending explicit approval in the operator interface; it has not executed.",
         }
 
     return _execute(action, arguments)
