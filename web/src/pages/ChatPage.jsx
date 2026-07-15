@@ -4,7 +4,6 @@ import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import { Plus, Send, Trash2 } from 'lucide-react'
 import { api, streamChat } from '../lib/api.js'
-import PageHeader from '../components/PageHeader.jsx'
 
 function upsertConversationItem(items, nextItem) {
   const index = items.findIndex((item) => item.id === nextItem.id)
@@ -65,16 +64,29 @@ export default function ChatPage() {
   const activeId = conversationId || null
   
   const messagesEndRef = useRef(null)
+  const messagesContainerRef = useRef(null)
+  const shouldAutoScrollRef = useRef(true)
   const streamingConversationIdRef = useRef(null)
   const streamingMessageIdRef = useRef(null)
   const isNewConversationRef = useRef(false)
   const isStreamingRef = useRef(false)
 
-  const scrollToMessagesBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  const scrollToMessagesBottom = (behavior = 'auto') => {
+    messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' })
   }
 
-  useEffect(() => { scrollToMessagesBottom() }, [messages])
+  const handleMessagesScroll = () => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    shouldAutoScrollRef.current = distanceFromBottom < 96
+  }
+
+  useEffect(() => {
+    if (!shouldAutoScrollRef.current) return undefined
+    const frame = window.requestAnimationFrame(() => scrollToMessagesBottom())
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages])
 
   const loadConversations = async () => {
     const res = await api.get('/api/conversations')
@@ -104,6 +116,7 @@ export default function ChatPage() {
     if (isStreamingRef.current && streamingConversationIdRef.current === activeId) {
       return
     }
+    shouldAutoScrollRef.current = true
     loadConversation(activeId)
   }, [activeId])
 
@@ -121,6 +134,7 @@ export default function ChatPage() {
   }, [activeId])
 
   const newChat = () => {
+    shouldAutoScrollRef.current = true
     setMessages([])
     setSteps([])
     navigate('/chat')
@@ -154,6 +168,7 @@ export default function ChatPage() {
       routing_skills: [],
     }
     streamingMessageIdRef.current = assistantMessageId
+    shouldAutoScrollRef.current = true
     isNewConversationRef.current = !activeId
     setMessages((prev) => [...prev, userMessage, assistantMessage])
     isStreamingRef.current = true
@@ -332,12 +347,13 @@ export default function ChatPage() {
         </div>
       </div>
 
-      <div className="flex min-w-0 flex-1 flex-col gap-6">
-        <PageHeader title="Chat" subtitle="Supervisor-driven operator console with step-level progress, not raw logs." />
-
+      <div className="flex min-w-0 flex-1 flex-col">
         <div className="panel flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="border-b border-border px-5 py-3 font-mono text-xs uppercase tracking-[0.18em] text-cyan">Conversation</div>
-          <div className="min-h-0 flex-1 space-y-4 overflow-auto p-5">
+          <div
+            ref={messagesContainerRef}
+            className="min-h-0 flex-1 space-y-4 overflow-auto p-5"
+            onScroll={handleMessagesScroll}
+          >
             {messages.length === 0 ? <div className="font-mono text-dim">Start a new investigation.</div> : null}
             {messages.map((message) => (
               <div key={message.id || message.timestamp} className={`rounded-xl border p-4 ${message.role === 'assistant' ? 'border-cyan/20 bg-cyan/5' : 'border-border bg-panel2'}`}>
@@ -352,7 +368,7 @@ export default function ChatPage() {
                   </div>
                 ) : null}
                 {message.role === 'assistant' ? (
-                  <div className={`markdown text-sm text-text ${message.thought_content ? 'mt-3' : ''}`}>
+                  <div className={`markdown text-base leading-7 text-text ${message.thought_content ? 'mt-3' : ''}`}>
                     {message.content ? (
                       <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                     ) : message.is_streaming ? (
@@ -363,7 +379,7 @@ export default function ChatPage() {
                     ) : null}
                   </div>
                 ) : (
-                  <div className="markdown text-sm text-text">
+                  <div className="markdown text-base leading-7 text-text">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                   </div>
                 )}
@@ -408,16 +424,16 @@ export default function ChatPage() {
             ) : null}
             <div ref={messagesEndRef} />
           </div>
-          <div className="border-t border-border p-4">
-            <div className="flex flex-col gap-2">
+          <div className="border-t border-border p-3">
+            <div className="flex items-end gap-2">
               <textarea
-                className="textarea min-h-24 flex-1"
+                className="textarea min-h-16 flex-1 resize-y"
                 placeholder="Ask SecurityClaw to investigate, query, compare, or triage... Press Enter to send, Shift+Enter for new line"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
               />
-              <button className="btn btn-primary self-start" onClick={send} disabled={busy || !input.trim()}>
+              <button className="btn btn-primary shrink-0" onClick={send} disabled={busy || !input.trim()}>
                 <Send className="h-4 w-4" /> {busy ? activityPhrase.toUpperCase() : 'SEND'}
               </button>
             </div>

@@ -1,4 +1,4 @@
-import { NavLink } from 'react-router-dom'
+import { NavLink, useLocation } from 'react-router-dom'
 import { Activity, Bot, Clock3, Cpu, RefreshCw, Settings, Shield } from 'lucide-react'
 import { api } from '../lib/api.js'
 import { useState } from 'react'
@@ -13,6 +13,8 @@ const links = [
 
 export default function Layout({ children }) {
   const [busy, setBusy] = useState(false)
+  const location = useLocation()
+  const isChatRoute = location.pathname === '/chat' || location.pathname.startsWith('/chat/')
 
   const restart = async () => {
     setBusy(true)
@@ -65,11 +67,13 @@ export default function Layout({ children }) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center justify-between border-b border-border bg-panel px-6">
-          <div className="font-mono text-xs uppercase tracking-[0.22em] text-dim">Autonomous SOC Operations Interface</div>
-          <div className="badge badge-green">online</div>
-        </header>
-        <div className="min-h-0 flex-1 overflow-auto p-6">{children}</div>
+        {!isChatRoute ? (
+          <header className="flex h-14 items-center justify-between border-b border-border bg-panel px-6">
+            <div className="font-mono text-xs uppercase tracking-[0.22em] text-dim">Autonomous SOC Operations Interface</div>
+            <div className="badge badge-green">online</div>
+          </header>
+        ) : null}
+        <div className={`min-h-0 flex-1 overflow-auto ${isChatRoute ? 'p-3' : 'p-6'}`}>{children}</div>
       </div>
     </div>
   )
