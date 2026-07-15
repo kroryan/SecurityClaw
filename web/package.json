@@ -4,6 +4,8 @@
   "version": "1.0.0",
   "type": "module",
   "scripts": {
+    "check:three": "node scripts/check-three.mjs",
+    "prebuild": "npm run check:three",
     "dev": "vite",
     "build": "vite build",
     "preview": "vite preview"
@@ -19,7 +21,7 @@
     "react-router-dom": "^6.30.0",
     "recharts": "^3.9.2",
     "remark-gfm": "^4.0.1",
-    "three": "^0.170.0"
+    "three": "0.185.1"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.3.4",
