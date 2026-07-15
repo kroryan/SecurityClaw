@@ -42,8 +42,12 @@ class TestSkillRequirementDiscovery:
         geoip_vars = requirements["geoip_lookup"]
         assert "MAXMIND_LICENSE_KEY" in geoip_vars
         
-        # Verify required flag
-        assert geoip_vars["MAXMIND_LICENSE_KEY"].get("optional") is False
+        assert "IPINFO_TOKEN" in geoip_vars
+        # Either provider credential satisfies GeoIP setup.
+        assert geoip_vars["MAXMIND_LICENSE_KEY"].get("optional") is True
+        assert geoip_vars["MAXMIND_LICENSE_KEY"].get("alternatives") == [
+            "MAXMIND_LICENSE_KEY", "IPINFO_TOKEN"
+        ]
         assert geoip_vars["MAXMIND_LICENSE_KEY"].get("is_secret") is True
 
     def test_discover_empty_for_skills_without_requirements(self):
@@ -70,6 +74,7 @@ class TestSkillRequirementDiscovery:
                 # geoip_lookup required var should appear as missing
                 assert "geoip_lookup" in missing
                 assert "MAXMIND_LICENSE_KEY" in missing["geoip_lookup"]
+                assert "IPINFO_TOKEN" in missing["geoip_lookup"]
 
     def test_missing_variables_with_partial_env_set(self):
         """Should report only unset variables as missing."""
@@ -107,6 +112,13 @@ class TestSkillRequirementDiscovery:
                 
                 # Should be empty
                 assert missing == {}
+
+    def test_ipinfo_token_satisfies_geoip_alternative_group(self):
+        env = {"IPINFO_TOKEN": "test-ipinfo-token"}
+        with patch.dict(os.environ, env, clear=True):
+            with patch("core.skill_onboarding.load_dotenv"):
+                missing = get_missing_skill_variables()
+                assert "geoip_lookup" not in missing
 
 
 class TestOnboardingState:

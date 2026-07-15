@@ -364,13 +364,20 @@ anomaly:
 
 geoip:
   enabled: true
+  provider: auto                 # Prefer MaxMind; fall back to IPinfo Lite
   db_path: data/geoip/GeoLite2-City.mmdb
   edition_id: GeoLite2-City
   update_interval_days: 7
   download_url: https://download.maxmind.com/app/geoip_download
   timeout_seconds: 60
   license_key: ""               # Loaded from .env via MAXMIND_LICENSE_KEY
+  ipinfo_token: ""              # Loaded from .env via IPINFO_TOKEN
+  ipinfo_url: https://api.ipinfo.io/lite
 ```
+
+Configure either `MAXMIND_LICENSE_KEY` for city-level local lookups or
+`IPINFO_TOKEN` for country, continent, and ASN enrichment. IPinfo Lite does not
+provide city, coordinates, postal code, or timezone fields.
 
 ### Index Configuration Explained
 
@@ -724,5 +731,4 @@ For issues, questions, or feature requests, open an issue or contact the Securit
 
   git grep -nEI '(password|api[_-]?key|BEGIN [A-Z ]*PRIVATE KEY|sk-)' -- .
   git log --all -G 'password|api[_-]?key|sk-' --oneline
-
 

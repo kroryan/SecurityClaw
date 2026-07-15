@@ -39,6 +39,10 @@ anomaly:
   max_findings_per_poll: 50
 geoip:
   enabled: true
+  # Provider selection is automatic: prefer the local MaxMind MMDB when
+  # available, otherwise use IPinfo Lite for country/continent/ASN enrichment.
+  provider: auto
+  ipinfo_url: https://api.ipinfo.io/lite
   # Local path where GeoLite2-City.mmdb will be stored
   db_path: data/geoip/GeoLite2-City.mmdb
   # MaxMind edition ID to download
@@ -49,4 +53,4 @@ geoip:
   # MaxMind official API endpoint for downloads
   download_url: https://download.maxmind.com/app/geoip_download
   timeout_seconds: 60
-  # License key loaded from .env: MAXMIND_LICENSE_KEY
+  # Credentials loaded from .env: MAXMIND_LICENSE_KEY and/or IPINFO_TOKEN

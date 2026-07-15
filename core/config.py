@@ -83,6 +83,8 @@ class Config:
             env_overrides.setdefault("geoip", {})["edition_id"] = os.getenv("MAXMIND_EDITION_ID")
         if os.getenv("MAXMIND_DB_PATH"):
             env_overrides.setdefault("geoip", {})["db_path"] = os.getenv("MAXMIND_DB_PATH")
+        if os.getenv("IPINFO_TOKEN"):
+            env_overrides.setdefault("geoip", {})["ipinfo_token"] = os.getenv("IPINFO_TOKEN")
 
         self._data = _deep_merge(self._data, env_overrides)
 

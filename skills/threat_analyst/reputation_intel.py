@@ -26,11 +26,14 @@ logger = logging.getLogger(__name__)
 ABUSEIPDB_URL = "https://api.abuseipdb.com/api/v2/check"
 ABUSEIPDB_KEY = os.getenv("ABUSEIPDB_API_KEY", "")
 
-ALIENVAULT_URL = "https://otx.alienvault.com/api/v1"
+ALIENVAULT_URL = "https://otx.alienvault.com/api/v1/indicators"
 ALIENVAULT_KEY = os.getenv("ALIENVAULT_API_KEY", "")
 
 VIRUSTOTAL_URL = "https://www.virustotal.com/api/v3"
 VIRUSTOTAL_KEY = os.getenv("VIRUSTOTAL_API_KEY", "")
+
+OTX_ENTITY_PATHS = {"ip": "IPv4", "domain": "domain"}
+VIRUSTOTAL_ENTITY_PATHS = {"ip": "ip_addresses", "domain": "domains"}
 
 TALOS_URL = "https://api.amp.cisco.com/v1"
 TALOS_KEY = os.getenv("TALOS_CLIENT_ID", "")
@@ -224,7 +227,11 @@ def _query_alienvault(entity: str, entity_type: str) -> dict:
     if not ALIENVAULT_KEY:
         return {}
 
-    url = f"{ALIENVAULT_URL}/{entity_type}/{entity}/general"
+    path_type = OTX_ENTITY_PATHS.get(entity_type)
+    if not path_type:
+        logger.debug("[reputation_intel] Unsupported AlienVault entity type: %s", entity_type)
+        return {}
+    url = f"{ALIENVAULT_URL}/{path_type}/{entity}/general"
     headers = {"X-OTX-API-KEY": ALIENVAULT_KEY}
 
     try:
@@ -281,7 +288,11 @@ def _query_virustotal(entity: str, entity_type: str) -> dict:
     
     try:
         # VirusTotal v3 API endpoints
-        url = f"{VIRUSTOTAL_URL}/{entity_type}/{entity}"
+        path_type = VIRUSTOTAL_ENTITY_PATHS.get(entity_type)
+        if not path_type:
+            logger.debug("[reputation_intel] Unsupported VirusTotal entity type: %s", entity_type)
+            return {}
+        url = f"{VIRUSTOTAL_URL}/{path_type}/{entity}"
         resp = requests.get(
             url,
             headers=headers,
