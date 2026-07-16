@@ -79,6 +79,7 @@ class AgentState(TypedDict, total=False):
     max_steps: int
     previously_run_skills: list  # list of plan signatures for previously executed steps
     plan_exhausted: bool
+    response_mode: str      # "tools", "direct", or "clarify"
 
     # Evaluation
     evaluation: dict        # {satisfied, confidence, reasoning, missing}
@@ -194,16 +195,25 @@ def _all_skills_in_plan(
     return all(skill_name in selected_skills for skill_name in available_checks)
 
 
-def _get_skills_requesting_log_search(available_skills: list[dict]) -> list[str]:
-    """Dynamically identify which available skills are used for log searching.
-    
-    This replaces hardcoded skill name sets like {"fields_querier", "opensearch_querier"}.
-    Returns list of skill names that perform log/data searching functions.
-    """
-    # Determine by checking manifest metadata or fallback to known function patterns
-    log_search_candidates = ["fields_querier", "opensearch_querier"]
+def _get_skills_requesting_log_search(
+    available_skills: list[dict],
+    manifests: dict[str, dict[str, Any]] | None = None,
+) -> list[str]:
+    """Resolve evidence-search skills exclusively from runtime manifest groups."""
+    manifests = manifests or {}
     available_names = _build_skill_name_set(available_skills)
-    return [name for name in log_search_candidates if name in available_names]
+    relevant_groups = {"log_search", "evidence_search", "field_discovery", "schema_discovery"}
+    return [
+        name
+        for name, manifest in manifests.items()
+        if name in available_names
+        and relevant_groups.intersection(
+            {
+                str(manifest.get("routing_group") or ""),
+                *[str(group) for group in (manifest.get("capability_groups") or [])],
+            }
+        )
+    ]
 
 
 
@@ -246,6 +256,12 @@ def _build_skill_catalog(
                 "required_entities": manifest_required_entities(manifest),
                 "artifact_inputs": manifest_artifact_inputs(manifest),
                 "artifact_outputs": manifest_artifact_outputs(manifest),
+                "supported_platforms": list(manifest.get("supported_platforms") or []),
+                "risk_level": str(manifest.get("risk_level") or "unspecified"),
+                "requires_operator_authorization": bool(
+                    manifest.get("requires_operator_authorization", False)
+                ),
+                "parameters": dict(manifest.get("parameters") or {}),
             }
         )
     return catalog
@@ -1150,6 +1166,10 @@ def execute_skill_workflow(
     """
     results = {}
     params = routing_decision.get("parameters", {})
+    by_skill_params = params.get("by_skill", {}) if isinstance(params, dict) else {}
+    shared_params = {
+        key: value for key, value in params.items() if key != "by_skill"
+    } if isinstance(params, dict) else {}
     aggregated_results = aggregated_results or {}
     
     # Load skill manifests for enrichment and auto-chain dispatching
@@ -1166,7 +1186,10 @@ def execute_skill_workflow(
         try:
             # Build context with parameters
             skill_context = runner._build_context()
-            skill_context["parameters"] = params.copy()
+            skill_specific = by_skill_params.get(skill_name, {})
+            if not isinstance(skill_specific, dict):
+                skill_specific = {}
+            skill_context["parameters"] = {**shared_params, **skill_specific}
             if memory is not None:
                 skill_context["memory"] = memory
             
@@ -1176,6 +1199,9 @@ def execute_skill_workflow(
             
             # Pass routing_decision so skills have access to supervisor's grounding
             skill_context["routing_decision"] = routing_decision
+            skill_context["operator_message"] = str(
+                routing_decision.get("operator_message") or ""
+            )
             
             # ── CONTEXT ENRICHMENT: Pass previous results to this skill ──────
             # This allows skills to see what was discovered in prior steps.
@@ -1213,7 +1239,7 @@ def execute_skill_workflow(
                         all_manifests=all_manifests,
                         runner=runner,
                         context=context,
-                        parameters=params,
+                        parameters=shared_params,
                         conversation_history=conversation_history,
                         memory=memory,
                     )
@@ -1295,6 +1321,7 @@ def decide_node(state: AgentState, config: RunnableConfig) -> dict:
     llm = rt["llm"]
     instruction = rt["instruction"]
     step_callback = rt.get("step_callback")
+    guidance_provider = rt.get("guidance_provider")
 
     aggregated_results: dict = state.get("skill_results") or {}
     previously_run_skills: list = list(state.get("previously_run_skills") or [])
@@ -1313,16 +1340,48 @@ def decide_node(state: AgentState, config: RunnableConfig) -> dict:
         all_manifests = {}
     
     # STEP 1: Get initial next action from supervisor
+    conversation_messages = list(state.get("messages") or [])
+    if callable(guidance_provider):
+        guidance = guidance_provider()
+        if guidance:
+            conversation_messages.append({
+                "role": "user",
+                "content": f"Operator guidance received during execution: {guidance}",
+            })
+            trace.append({"step": step_count, "operator_guidance": guidance})
+
     decision = _supervisor_next_action(
         user_question=state["user_question"],
         available_skills=available_skills,
         llm=llm,
         instruction=instruction,
-        conversation_history=list(state.get("messages") or []),
+        conversation_history=conversation_messages,
         previous_trace=trace[-3:],
         current_results=aggregated_results,
         previous_eval=last_eval,
     )
+    action = str(decision.get("action") or "").strip().lower()
+    if action == "answer":
+        decision["response_mode"] = "direct"
+    elif action == "ask_user":
+        decision["response_mode"] = "clarify"
+    elif action in {"use_tool", "use_tools"}:
+        decision["response_mode"] = "tools"
+    response_mode = str(decision.get("response_mode") or "tools").lower()
+    if response_mode in {"direct", "clarify"}:
+        decision["skills"] = []
+        if step_callback:
+            step_callback("deciding", decision, step_count, max_steps)
+        return {
+            "skill_plan": [],
+            "step_count": step_count,
+            "pending_parameters": dict(
+                decision.get("parameters") or {"question": state["user_question"]}
+            ),
+            "pending_reasoning": str(decision.get("reasoning", "")),
+            "response_mode": response_mode,
+            "plan_exhausted": True,
+        }
     effective_question = str(
         (decision.get("parameters") or {}).get("question") or state["user_question"]
     )
@@ -1336,7 +1395,8 @@ def decide_node(state: AgentState, config: RunnableConfig) -> dict:
         manifests=all_manifests,
     )
     decision["skills"] = selected
-    # STEP 2: Review and refine the plan (review+repair cycle with deterministic grounding)
+    # Review and refine the proposed action before it can touch a tool. The
+    # supervisor will still receive the resulting observation on the next loop.
     decision = _review_and_refine_supervisor_plan(
         decision=decision,
         user_question=state["user_question"],
@@ -1481,6 +1541,7 @@ def decide_node(state: AgentState, config: RunnableConfig) -> dict:
         "pending_parameters": dict(decision.get("parameters") or {"question": state["user_question"]}),
         "pending_reasoning": str(decision.get("reasoning", "")),
         "pending_question_grounding": dict(decision.get("question_grounding") or {}),
+        "response_mode": "tools",
         "plan_exhausted": plan_exhausted,
     }
 
@@ -1514,6 +1575,7 @@ def execute_node(state: AgentState, config: RunnableConfig) -> dict:
         "parameters": pending_parameters or {"question": state["user_question"]},
         "reasoning": pending_reasoning,
         "question_grounding": pending_question_grounding,
+        "operator_message": state["user_question"],
     }
 
     step_results = execute_skill_workflow(
@@ -1526,13 +1588,41 @@ def execute_node(state: AgentState, config: RunnableConfig) -> dict:
         memory=graph_memory,
     )
     aggregated_results.update(step_results)
+    if step_callback:
+        step_callback(
+            "observed",
+            {
+                "skills": skill_plan,
+                "results": {
+                    name: _compact_prompt_value(result)
+                    for name, result in step_results.items()
+                },
+            },
+            step_count,
+            max_steps,
+        )
     previously_run_skills.append(_plan_signature(skill_plan, pending_parameters))
+
+    trace = list(state.get("trace") or [])
+    trace.append({
+        "step": step_count,
+        "decision": {
+            "reasoning": pending_reasoning,
+            "skills": skill_plan,
+            "parameters": pending_parameters,
+        },
+        "observations": {
+            name: _compact_prompt_value(result)
+            for name, result in step_results.items()
+        },
+    })
 
     mem_updates = graph_memory.to_dict()
 
     return {
         "skill_results": aggregated_results,
         "previously_run_skills": previously_run_skills,
+        "trace": trace,
         **mem_updates,
     }
 
@@ -1545,6 +1635,16 @@ def evaluate_node(state: AgentState, config: RunnableConfig) -> dict:
     even if the next plan is empty. Let the LLM decide satisfaction based on what we have.
     Never force hardcoded "not satisfied" - that prevents proper agentic iteration.
     """
+    if state.get("response_mode") in {"direct", "clarify"}:
+        return {
+            "evaluation": {
+                "satisfied": True,
+                "confidence": 1.0,
+                "reasoning": "No new evidence is required for this conversational response.",
+                "missing": [],
+            }
+        }
+
     rt = _graph_runtime(config)
     llm = rt["llm"]
     instruction = rt["instruction"]
@@ -1572,13 +1672,25 @@ def evaluate_node(state: AgentState, config: RunnableConfig) -> dict:
         planned_skills=skill_plan,
     )
 
-    trace.append({
+    evaluation_trace = {
         "step": step_count,
         "decision": {"skills": skill_plan},
         "selected_skills": skill_plan,
         "step_result_keys": list((state.get("skill_results") or {}).keys()),
         "evaluation": last_eval,
-    })
+    }
+    if (
+        trace
+        and trace[-1].get("step") == step_count
+        and "observations" in trace[-1]
+    ):
+        trace[-1].update({
+            "selected_skills": skill_plan,
+            "step_result_keys": evaluation_trace["step_result_keys"],
+            "evaluation": last_eval,
+        })
+    else:
+        trace.append(evaluation_trace)
 
     logger.info(
         "[%s] Graph step %d/%d | skills=%s | satisfied=%s (%.2f)",
@@ -1598,6 +1710,11 @@ def memory_write_node(state: AgentState, config: RunnableConfig) -> dict:  # noq
     return {}
 
 
+def await_authorization_node(state: AgentState, config: RunnableConfig) -> dict:  # noqa: ARG001
+    """Checkpoint an approval request before generating operator instructions."""
+    return {"response_mode": "direct", "plan_exhausted": True}
+
+
 def format_response_node(state: AgentState, config: RunnableConfig) -> dict:
     """FORMAT: render the final natural-language response."""
     rt = _graph_runtime(config)
@@ -1610,6 +1727,18 @@ def format_response_node(state: AgentState, config: RunnableConfig) -> dict:
     last_eval: dict = state.get("evaluation") or {}
     user_question: str = state["user_question"]
     graph_memory = StateBackedMemory.from_state(state)
+    step_callback = rt.get("step_callback")
+    step_count = int(state.get("step_count") or 0)
+    max_steps = int(state.get("max_steps") or 4)
+
+    def token_callback(phase: str, token: str) -> None:
+        if step_callback:
+            step_callback(
+                "token",
+                {"phase": phase, "token": token},
+                step_count,
+                max_steps,
+            )
 
     # Build final_routing compatible with format_response()
     final_routing = {
@@ -1624,6 +1753,11 @@ def format_response_node(state: AgentState, config: RunnableConfig) -> dict:
     # Previous implementation would re-route after timeout, contradicting should_loop() termination.
     # format_response() delegates to fallback agent if needed for domain expertise.
 
+    manifests = SkillManifestLoader().load_all_manifests()
+    endpoint_investigation = any(
+        "endpoint_security" in (manifests.get(name, {}).get("capability_groups") or [])
+        for name in aggregated_results
+    )
     response = format_response(
         user_question,
         final_routing,
@@ -1631,6 +1765,17 @@ def format_response_node(state: AgentState, config: RunnableConfig) -> dict:
         llm,
         cfg,
         available_skills=available_skills,
+        token_callback=token_callback if step_callback else None,
+        conversation_history=list(state.get("messages") or []),
+        execution_trace=trace,
+        response_mode=str(state.get("response_mode") or "direct"),
+        force_agent_synthesis=(
+            bool(aggregated_results)
+            and (
+                endpoint_investigation
+                or state.get("response_mode") in {"direct", "clarify"}
+            )
+        ),
     )
 
     return {
@@ -1692,6 +1837,16 @@ def should_loop(state: AgentState) -> str:
     return "decide"
 
 
+def route_after_observation(state: AgentState) -> str:
+    """Map the legacy loop verdict onto the explicit ReAct graph nodes."""
+    if any(
+        isinstance(result, dict) and result.get("status") == "approval_required"
+        for result in (state.get("skill_results") or {}).values()
+    ):
+        return "await_authorization"
+    return "think" if should_loop(state) == "decide" else "generate_response"
+
+
 def build_graph(checkpointer=None):
     """Compile the SecurityClaw orchestration StateGraph.
 
@@ -1702,22 +1857,26 @@ def build_graph(checkpointer=None):
     _checkpointer = checkpointer if checkpointer is not None else MemorySaver()
 
     builder = StateGraph(AgentState)
-    builder.add_node("decide", decide_node)
-    builder.add_node("execute", execute_node)
-    builder.add_node("evaluate", evaluate_node)
-    builder.add_node("memory_write", memory_write_node)
-    builder.add_node("format", format_response_node)
+    builder.add_node("think", decide_node)
+    builder.add_node("execute_tools", execute_node)
+    builder.add_node("observe", evaluate_node)
+    builder.add_node("await_authorization", await_authorization_node)
+    builder.add_node("generate_response", format_response_node)
 
-    builder.add_edge(START, "decide")
-    builder.add_edge("decide", "execute")
-    builder.add_edge("execute", "evaluate")
+    builder.add_edge(START, "think")
+    builder.add_edge("think", "execute_tools")
+    builder.add_edge("execute_tools", "observe")
     builder.add_conditional_edges(
-        "evaluate",
-        should_loop,
-        {"decide": "decide", "memory_write": "memory_write"},
+        "observe",
+        route_after_observation,
+        {
+            "think": "think",
+            "await_authorization": "await_authorization",
+            "generate_response": "generate_response",
+        },
     )
-    builder.add_edge("memory_write", "format")
-    builder.add_edge("format", END)
+    builder.add_edge("await_authorization", "generate_response")
+    builder.add_edge("generate_response", END)
 
     return builder.compile(checkpointer=_checkpointer)
 
@@ -1733,6 +1892,7 @@ def run_graph(
     step_callback: Any = None,
     thread_id: str | None = None,
     checkpointer: Any = None,
+    guidance_provider: Any = None,
 ) -> dict:
     """Execute the LangGraph orchestration pipeline for a single Q&A turn.
 
@@ -1765,6 +1925,7 @@ def run_graph(
         "step_count": 0,
         "max_steps": max_steps,
         "previously_run_skills": [],
+        "response_mode": "tools",
         "evaluation": {},
         "trace": [],
         "mem_status": "IDLE",
@@ -1787,6 +1948,7 @@ def run_graph(
             "instruction": instruction,
             "cfg": cfg,
             "step_callback": step_callback,
+            "guidance_provider": guidance_provider,
         }
     }
 
@@ -1828,6 +1990,68 @@ def orchestrate_with_supervisor(
         conversation_history=conversation_history,
         step_callback=step_callback,
     )
+
+
+def _compact_prompt_value(value: Any, *, depth: int = 0) -> Any:
+    """Bound tool evidence while preserving facts needed for the next decision."""
+    if depth >= 4:
+        return str(value)[:500]
+    if isinstance(value, dict):
+        priority = (
+            "status", "error", "summary", "answer", "findings", "results_count",
+            "results", "verdicts", "ips", "domains", "countries", "ports",
+            "protocols", "time_range", "field_mappings", "timeline",
+        )
+        ordered_keys = [key for key in priority if key in value]
+        ordered_keys.extend(key for key in value if key not in ordered_keys)
+        return {
+            str(key): _compact_prompt_value(value[key], depth=depth + 1)
+            for key in ordered_keys[:24]
+        }
+    if isinstance(value, list):
+        return [_compact_prompt_value(item, depth=depth + 1) for item in value[:12]]
+    if isinstance(value, str):
+        return value[:1800]
+    return value
+
+
+def _build_conversation_context(
+    conversation_history: list[dict] | None,
+    *,
+    max_messages: int = 10,
+    max_chars: int = 7000,
+) -> str:
+    """Render recent turns for reference resolution without unbounded growth."""
+    history = list(conversation_history or [])[-max_messages:]
+    if not history:
+        return "(no previous conversation)"
+
+    lines: list[str] = []
+    for message in history:
+        role = "USER" if message.get("role") == "user" else "ASSISTANT"
+        content = " ".join(str(message.get("content") or "").split())
+        if content:
+            lines.append(f"{role}: {content[:1800]}")
+    rendered = "\n".join(lines)
+    return rendered[-max_chars:] if rendered else "(no usable previous conversation)"
+
+
+def _build_result_context(
+    current_results: dict | None,
+    *,
+    max_chars: int = 10000,
+) -> str:
+    """Expose compact, factual tool outputs instead of status counters alone."""
+    if not current_results:
+        return "(no tools have run yet)"
+    compact = {
+        skill_name: _compact_prompt_value(result)
+        for skill_name, result in current_results.items()
+    }
+    rendered = json.dumps(compact, indent=2, default=str)
+    if len(rendered) <= max_chars:
+        return rendered
+    return rendered[:max_chars] + "\n... [tool evidence truncated]"
 
 
 def _supervisor_next_action(
@@ -1878,23 +2102,12 @@ def _supervisor_next_action(
         f"- {s.get('name')}: {s.get('description', '')}"
         for s in available_skills
     )
-    history_text = "\n".join(
-        f"- {m.get('role', '?')}: {str(m.get('content', ''))[:220]}"
-        for m in conversation_history[-6:]
-    )
+    conversation_context = _build_conversation_context(conversation_history)
     prior_steps = json.dumps(previous_trace[-3:], indent=2, default=str) if previous_trace else "[]"
     result_keys = list(current_results.keys())
     question_grounding = _deterministic_supervisor_question_grounding(user_question) or {}
 
-    # Summarize what each result returned so the supervisor can make intelligent choices.
-    result_summary_lines = []
-    for skill_name, result in current_results.items():
-        count = result.get("results_count") or result.get("log_records") or (
-            len(result.get("results", [])) if isinstance(result.get("results"), list) else 0
-        )
-        status = result.get("status", "?")
-        result_summary_lines.append(f"  {skill_name}: status={status}, records_found={count}")
-    result_summary = "\n".join(result_summary_lines) or "  (no skills have run yet)"
+    result_summary = _build_result_context(current_results)
 
     next_action_template = _load_prompt_template(
         SUPERVISOR_NEXT_ACTION_PROMPT_PATH,
@@ -1903,6 +2116,9 @@ You are the SOC supervisor orchestrator.
 
 QUESTION:
 {{USER_QUESTION}}
+
+RELEVANT CONVERSATION:
+{{CONVERSATION_CONTEXT}}
 
 AVAILABLE SKILLS:
 {{SKILLS_DESCRIPTION}}{{MANIFEST_CONTEXT}}
@@ -1919,14 +2135,15 @@ QUESTION GROUNDING FROM CURRENT QUESTION ONLY:
 PREVIOUS EVALUATION:
 {{PREVIOUS_EVALUATION}}
 
-Return strict JSON with reasoning, skills, and parameters.question.
+Return strict JSON with reasoning, skills, and parameters. Use
+parameters.by_skill for skill-specific arguments.
 """,
     )
     prompt = _render_prompt(
         next_action_template,
         {
             "USER_QUESTION": user_question,
-            "HISTORY_TEXT": history_text or "- none",
+            "CONVERSATION_CONTEXT": conversation_context,
             "SKILLS_DESCRIPTION": skills_description,
             "MANIFEST_CONTEXT": manifest_context,
             "SKILL_CATALOG_JSON": skill_catalog_json,
@@ -2052,7 +2269,7 @@ Return strict JSON with reasoning, skills, and parameters.question.
             has_known_entities = bool(extracted_entities.get("ips") or extracted_entities.get("domains"))
             
             threat_analyst_available = _skill_exists(available_skills, "threat_analyst")
-            skills_requesting_log_search = _get_skills_requesting_log_search(available_skills)
+            skills_requesting_log_search = _get_skills_requesting_log_search(available_skills, manifests)
             llm_wants_log_search = _any_skill_in_plan(skills_requesting_log_search, parsed.get("skills", []), available_skills)
             
             if has_known_entities and threat_analyst_available and llm_wants_log_search:
@@ -3109,6 +3326,11 @@ def format_response(
     llm: Any,
     cfg: Any = None,  # Pass config for anti-hallucination setting
     available_skills: list[dict] | None = None,
+    token_callback: Any = None,
+    conversation_history: list[dict] | None = None,
+    execution_trace: list[dict] | None = None,
+    response_mode: str = "direct",
+    force_agent_synthesis: bool = False,
 ) -> str:
     """
     Format skill results into a natural language response with thinking-action-reflection loop.
@@ -3122,14 +3344,81 @@ def format_response(
     Uses manifest-declared response_formatter hooks when available.
     Falls back to hardcoded logic for backward compatibility.
     """
+    if force_agent_synthesis and skill_results:
+        synthesis_prompt = (
+            f"User request:\n{user_question}\n\n"
+            "Relevant recent conversation:\n"
+            f"{_build_conversation_context(conversation_history)}\n\n"
+            "Agent actions and observations:\n"
+            f"{json.dumps(execution_trace or [], indent=2, default=str)[:14000]}\n\n"
+            "Latest results by skill:\n"
+            f"{_build_result_context(skill_results, max_chars=14000)}\n\n"
+            "Produce a complete security assessment using every relevant observation, not only the last tool result. "
+            "Cover the host posture, processes, network exposure and connections, persistence, file integrity, "
+            "and threat intelligence whenever those observations are available. Separate confirmed findings from "
+            "interpretation, explain severity and practical impact, identify coverage gaps, and provide prioritized "
+            "next actions. Do not call a host safe merely because no indicator was found. Do not expose internal "
+            "planning or raw tool names, and do not make unsupported conclusions. Use clear headings and enough "
+            "detail for an operator to act. If an observation has status `approval_required`, state only that the "
+            "action is pending in the operator approval interface and has not executed; never reproduce its token "
+            "or ask for approval in chat. Reply in the user's language."
+        )
+        return _chat_response(
+            llm,
+            [
+                {
+                    "role": "system",
+                    "content": (
+                        "You are SecurityClaw, an autonomous defensive security agent. "
+                        "Synthesize a clear, evidence-grounded final answer from the complete investigation."
+                    ),
+                },
+                {"role": "user", "content": synthesis_prompt},
+            ],
+            token_callback=token_callback,
+            phase="answer",
+        )
+
     if not routing_decision.get("skills"):
-        # Generate dynamic list of available skills instead of hardcoded fallback
-        if available_skills:
-            skill_names = [s.get("name") for s in available_skills if s.get("name")]
-            skills_str = ", ".join(sorted(skill_names))
-        else:
-            skills_str = "network_baseliner, anomaly_triage, threat_analyst"
-        return f"I couldn't determine which skills would help with that question. Available skills are: {skills_str}."
+        # An empty plan is valid for conversational, identity, capability, and
+        # explanatory questions. Let the model answer directly instead of
+        # treating the absence of a tool call as a routing failure.
+        skill_catalog = [
+            {
+                "name": skill.get("name"),
+                "description": skill.get("description", ""),
+            }
+            for skill in (available_skills or [])
+            if skill.get("name")
+        ]
+        direct_system_prompt = (
+            "You are SecurityClaw, a defensive security operations assistant. "
+            "Answer the user's question directly and in the same language as the user. "
+            "You may explain your identity, purpose, architecture, limitations, and available skills. "
+            "Do not invent capabilities, claim that a tool ran, or force a tool call when none is needed. "
+            "When describing skills, translate their purpose into clear user-facing language."
+        )
+        if response_mode == "clarify":
+            direct_system_prompt += (
+                " Ask one concise clarification question that is necessary before taking action. "
+                "Do not claim that an investigation or tool execution already occurred."
+            )
+        direct_user_prompt = (
+            f"User question:\n{user_question}\n\n"
+            "Relevant recent conversation:\n"
+            f"{_build_conversation_context(conversation_history)}\n\n"
+            "Currently available SecurityClaw skills:\n"
+            f"{json.dumps(skill_catalog, indent=2, default=str)}"
+        )
+        return _chat_response(
+            llm,
+            [
+                {"role": "system", "content": direct_system_prompt},
+                {"role": "user", "content": direct_user_prompt},
+            ],
+            token_callback=token_callback,
+            phase="answer",
+        )
     
     # ══════════════════════════════════════════════════════════════════════════════
     # PHASE 0: TRY MANIFEST-DECLARED FORMATTERS (NEW ARCHITECTURE)
@@ -3276,10 +3565,15 @@ Be specific and concise.
     )
     think_prompt = _render_prompt(think_template, {"USER_QUESTION": user_question})
     
-    think_response = llm.chat([
+    think_response = _chat_response(
+        llm,
+        [
         {"role": "system", "content": "You are a security analyst. Extract structured intent."},
         {"role": "user", "content": think_prompt},
-    ])
+        ],
+        token_callback=token_callback,
+        phase="think",
+    )
     
     # ── PHASE 2: ACTION (already done above) ──────────────────────────────
     # skill_results already contains results from executed skills
@@ -3316,10 +3610,15 @@ Briefly assess coverage in 2-3 sentences.
         },
     )
     
-    reflection_response = llm.chat([
+    reflection_response = _chat_response(
+        llm,
+        [
         {"role": "system", "content": "You are a critical analyst. Assess if results are sufficient."},
         {"role": "user", "content": reflection_prompt},
-    ])
+        ],
+        token_callback=token_callback,
+        phase="reflect",
+    )
     
     # ── PHASE 4: ANTI-HALLUCINATION CHECK ───────────────────────────────────
     # Check if anti-hallucination is enabled in config
@@ -3358,10 +3657,15 @@ Provide only the direct answer.
             },
         )
         
-        final_response = llm.chat([
+        final_response = _chat_response(
+            llm,
+            [
             {"role": "system", "content": "You are a rigorous security analyst. Verify internally but output only clean answers without preamble."},
             {"role": "user", "content": verification_prompt},
-        ])
+            ],
+            token_callback=token_callback,
+            phase="answer",
+        )
     else:
         # Standard response without extra verification
         final_template = _load_prompt_template(
@@ -3385,10 +3689,15 @@ Provide a clear, actionable answer in 2-4 sentences.
             },
         )
         
-        final_response = llm.chat([
+        final_response = _chat_response(
+            llm,
+            [
             {"role": "system", "content": "You are a helpful SOC analyst. Provide clear, actionable insights."},
             {"role": "user", "content": final_prompt},
-        ])
+            ],
+            token_callback=token_callback,
+            phase="answer",
+        )
     
     # ── APPEND THREAT INTEL APIs INFO if threat_analyst was used ──────────────
     threat_analyst_result = skill_results.get("threat_analyst", {})
@@ -3406,6 +3715,23 @@ Provide a clear, actionable answer in 2-4 sentences.
             final_response += f"\n\n_[Threat Intelligence Sources Queried: {apis_str}]_"
     
     return final_response
+
+
+def _chat_response(
+    llm: Any,
+    messages: list[dict],
+    *,
+    token_callback: Any = None,
+    phase: str = "answer",
+) -> str:
+    """Use provider streaming when a request-scoped token callback is available."""
+    stream_chat = getattr(llm, "stream_chat", None)
+    if token_callback and callable(stream_chat):
+        return stream_chat(
+            messages,
+            token_callback=lambda token: token_callback(phase, token),
+        )
+    return llm.chat(messages)
 
 
 def _append_threat_intel_summary(base_response: str, threat_result: dict) -> str:
@@ -4100,6 +4426,48 @@ def add_to_history(conversation_id: str, question: str, answer: str,
     }
     history.append(assistant_entry)
     
+    save_conversation_history(conversation_id, history)
+
+
+def add_user_message_to_history(conversation_id: str, question: str) -> None:
+    """Persist a user message before long-running chat processing begins."""
+    from datetime import datetime, timezone
+
+    history = load_conversation_history(conversation_id)
+    history.append({
+        "role": "user",
+        "content": question,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+    })
+    save_conversation_history(conversation_id, history)
+
+
+def add_assistant_message_to_history(
+    conversation_id: str,
+    answer: str,
+    routing: dict | None = None,
+    skill_results: dict | None = None,
+    trace: list[dict] | None = None,
+    agent_timeline: list[dict] | None = None,
+    *,
+    error: bool = False,
+) -> None:
+    """Complete a previously persisted chat turn, including failed turns."""
+    from datetime import datetime, timezone
+
+    routing = routing or {}
+    history = load_conversation_history(conversation_id)
+    history.append({
+        "role": "assistant",
+        "content": answer,
+        "timestamp": datetime.now(timezone.utc).isoformat(),
+        "routing_skills": routing.get("skills", []),
+        "routing_reasoning": routing.get("reasoning", ""),
+        "skill_results": skill_results or {},
+        "trace": trace or [],
+        "agent_timeline": agent_timeline or [],
+        "error": error,
+    })
     save_conversation_history(conversation_id, history)
 
 

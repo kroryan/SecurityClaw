@@ -65,6 +65,12 @@ class Config:
             env_overrides.setdefault("db", {})["password"] = os.getenv("DB_PASSWORD")
         if os.getenv("OLLAMA_BASE_URL"):
             env_overrides.setdefault("llm", {})["ollama_base_url"] = os.getenv("OLLAMA_BASE_URL")
+        for env_key, config_key in {
+            "LLM_PROVIDER": "provider", "OPENAI_BASE_URL": "openai_base_url",
+            "OPENAI_MODEL": "openai_model", "ANTHROPIC_MODEL": "anthropic_model",
+        }.items():
+            if os.getenv(env_key):
+                env_overrides.setdefault("llm", {})[config_key] = os.getenv(env_key)
         
         # External reputation intelligence API keys
         if os.getenv("ABUSEIPDB_API_KEY"):
@@ -83,6 +89,8 @@ class Config:
             env_overrides.setdefault("geoip", {})["edition_id"] = os.getenv("MAXMIND_EDITION_ID")
         if os.getenv("MAXMIND_DB_PATH"):
             env_overrides.setdefault("geoip", {})["db_path"] = os.getenv("MAXMIND_DB_PATH")
+        if os.getenv("IPINFO_TOKEN"):
+            env_overrides.setdefault("geoip", {})["ipinfo_token"] = os.getenv("IPINFO_TOKEN")
 
         self._data = _deep_merge(self._data, env_overrides)
 

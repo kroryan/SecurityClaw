@@ -245,9 +245,10 @@ TALOS_CLIENT_ID           — Cisco enterprise intelligence
 TALOS_CLIENT_SECRET       — Cisco enterprise intelligence
 ```
 
-**geoip_lookup** (required):
+**geoip_lookup** (choose one provider):
 ```
-MAXMIND_LICENSE_KEY       — Download GeoIP database (required)
+MAXMIND_LICENSE_KEY       — Download the city-level local GeoIP database
+IPINFO_TOKEN              — Country, continent, and ASN fallback via IPinfo Lite
 ```
 
 ### Custom Skills

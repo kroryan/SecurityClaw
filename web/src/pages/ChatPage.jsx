@@ -1,10 +1,12 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
-import { useNavigate, useParams } from 'react-router-dom'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState } from 'react'
+import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
-import { Plus, Send, Trash2 } from 'lucide-react'
+import { BarChart3, Brain, History, ListTree, PanelRightClose, PanelRightOpen, Plus, ScanSearch, Send, Trash2, Wrench, X } from 'lucide-react'
 import { api, streamChat } from '../lib/api.js'
-import PageHeader from '../components/PageHeader.jsx'
+
+const EndpointInsights = lazy(() => import('../components/EndpointInsights.jsx'))
+const EvidenceGraph = lazy(() => import('../components/EvidenceGraph.jsx'))
 
 function upsertConversationItem(items, nextItem) {
   const index = items.findIndex((item) => item.id === nextItem.id)
@@ -43,38 +45,96 @@ function getActivityPhrases(step) {
     thinking: ['thinking', 'working', 'checking'],
     fetching: ['checking', 'working', 'thinking'],
     evaluating: ['checking', 'reviewing', 'thinking'],
+    tool: ['observing', 'checking', 'thinking'],
     processing: ['working', 'checking', 'thinking'],
   }
 
   return byKind[step?.kind] || ['thinking', 'working', 'checking']
 }
 
+function findApproval(results) {
+  if (!results || typeof results !== 'object') return null
+  for (const [skill, result] of Object.entries(results)) {
+    if (result && typeof result === 'object' && result.status === 'approval_required' && result.authorization_token) {
+      return { skill, ...result }
+    }
+  }
+  return null
+}
+
 const THOUGHT_TOKEN_PHASES = new Set(['skills_check', 'think', 'reflect'])
 const FINAL_TOKEN_PHASES = new Set(['direct_answer', 'answer', 'response_final'])
+
+function AgentTimeline({ items = [] }) {
+  if (!items.length) return null
+  return (
+    <div className="mb-4 space-y-3 border-l border-cyan/30 pl-4">
+      {items.map((item, index) => (
+        <details key={`${item.kind}-${item.step || 0}-${index}`} className="rounded-xl border border-border/70 bg-panel2 p-3" open={item.kind === 'tool'}>
+          <summary className="flex cursor-pointer list-none items-center gap-2">
+            {item.kind === 'thinking' ? <Brain className="h-4 w-4 text-cyan" /> : <Wrench className="h-4 w-4 text-neon" />}
+            <span className="font-mono text-[11px] uppercase tracking-[0.16em] text-cyan">{item.label}</span>
+            {item.action ? <span className="badge badge-green">{item.action}</span> : null}
+          </summary>
+          <div className="mt-2 text-sm text-text">{item.detail}</div>
+          {item.reasoning ? <div className="mt-2 text-sm text-dim">Reasoning: {item.reasoning}</div> : null}
+          {item.skills?.length ? <div className="mt-2 flex flex-wrap gap-2">{item.skills.map((skill) => <span key={skill} className="badge badge-green">{skill}</span>)}</div> : null}
+          {item.debug ? <pre className="mt-3 max-h-80 overflow-auto whitespace-pre-wrap rounded-lg bg-black/20 p-3 text-xs text-dim">{JSON.stringify(item.debug, null, 2)}</pre> : null}
+        </details>
+      ))}
+    </div>
+  )
+}
 
 export default function ChatPage() {
   const { conversationId } = useParams()
   const navigate = useNavigate()
+  const location = useLocation()
   const [conversations, setConversations] = useState([])
   const [messages, setMessages] = useState([])
+  const [messagesConversationId, setMessagesConversationId] = useState(null)
   const [input, setInput] = useState('')
   const [steps, setSteps] = useState([])
   const [busy, setBusy] = useState(false)
   const [activityPhraseIndex, setActivityPhraseIndex] = useState(0)
   const [reasoningExpanded, setReasoningExpanded] = useState(false)
+  const [agentView, setAgentView] = useState('timeline')
+  const [agentDrawerOpen, setAgentDrawerOpen] = useState(false)
+  const [conversationsOpen, setConversationsOpen] = useState(false)
+  const [resolvedApprovalTokens, setResolvedApprovalTokens] = useState(() => {
+    try { return new Set(JSON.parse(sessionStorage.getItem('securityclaw:resolved-approvals') || '[]')) } catch { return new Set() }
+  })
+  const [approvalBusy, setApprovalBusy] = useState(false)
+  const [approvalError, setApprovalError] = useState('')
   const activeId = conversationId || null
   
   const messagesEndRef = useRef(null)
+  const messagesContainerRef = useRef(null)
+  const shouldAutoScrollRef = useRef(true)
   const streamingConversationIdRef = useRef(null)
   const streamingMessageIdRef = useRef(null)
   const isNewConversationRef = useRef(false)
   const isStreamingRef = useRef(false)
+  const isSendingRef = useRef(false)
+  const activeConversationRef = useRef(activeId)
+  const conversationLoadSequenceRef = useRef(0)
 
-  const scrollToMessagesBottom = () => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' })
+  const scrollToMessagesBottom = (behavior = 'auto') => {
+    messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' })
   }
 
-  useEffect(() => { scrollToMessagesBottom() }, [messages])
+  const handleMessagesScroll = () => {
+    const container = messagesContainerRef.current
+    if (!container) return
+    const distanceFromBottom = container.scrollHeight - container.scrollTop - container.clientHeight
+    shouldAutoScrollRef.current = distanceFromBottom < 96
+  }
+
+  useEffect(() => {
+    if (!shouldAutoScrollRef.current) return undefined
+    const frame = window.requestAnimationFrame(() => scrollToMessagesBottom())
+    return () => window.cancelAnimationFrame(frame)
+  }, [messages])
 
   const loadConversations = async () => {
     const res = await api.get('/api/conversations')
@@ -82,8 +142,10 @@ export default function ChatPage() {
   }
 
   const loadConversation = async (id) => {
+    const sequence = ++conversationLoadSequenceRef.current
     if (!id) {
       setMessages([])
+      setMessagesConversationId(null)
       return
     }
     const res = await api.get(`/api/conversations/${id}`)
@@ -91,37 +153,86 @@ export default function ChatPage() {
       ...msg,
       id: msg.id || `${msg.timestamp}-${idx}`,
     }))
-    setMessages(loadedMessages)
+    if (sequence === conversationLoadSequenceRef.current && activeConversationRef.current === id) {
+      setMessages(loadedMessages)
+      setMessagesConversationId(id)
+    }
   }
 
   useEffect(() => { loadConversations() }, [])
   useEffect(() => {
+    activeConversationRef.current = activeId
+    conversationLoadSequenceRef.current += 1
     if (!activeId) {
       setMessages([])
+      setMessagesConversationId(null)
+      setSteps([])
       return
     }
     // Skip reloading if this conversation is currently receiving a stream
     if (isStreamingRef.current && streamingConversationIdRef.current === activeId) {
       return
     }
+    shouldAutoScrollRef.current = true
+    setMessages([])
+    setMessagesConversationId(null)
+    setSteps([])
     loadConversation(activeId)
   }, [activeId])
 
+  useEffect(() => {
+    if (!activeId) return undefined
+
+    const timer = window.setInterval(() => {
+      if (!isStreamingRef.current) {
+        loadConversation(activeId)
+        loadConversations()
+      }
+    }, 2000)
+
+    return () => window.clearInterval(timer)
+  }, [activeId])
+
   const newChat = () => {
+    shouldAutoScrollRef.current = true
     setMessages([])
+    setMessagesConversationId(null)
     setSteps([])
-    navigate('/chat')
+    navigate('/agent')
   }
 
   const removeConversation = async (id) => {
     await api.delete(`/api/conversations/${id}`)
     await loadConversations()
-    if (activeId === id) navigate('/chat')
+    if (activeId === id) navigate('/agent')
   }
 
-  const send = async () => {
-    if (!input.trim() || busy) return
-    const outgoing = input.trim()
+  const send = async (messageOverride = null) => {
+    const requestedMessage = typeof messageOverride === 'string' ? messageOverride.trim() : input.trim()
+    if (!requestedMessage || isSendingRef.current) return
+    if (busy) {
+      const guidance = requestedMessage
+      const guidanceConversationId = activeId || streamingConversationIdRef.current
+      if (!guidanceConversationId) return
+      isSendingRef.current = true
+      try {
+        await api.post('/api/chat/guidance', {
+          conversation_id: guidanceConversationId,
+          message: guidance,
+        })
+        setInput('')
+        setSteps((prev) => [...prev, {
+          kind: 'guidance',
+          label: 'Operator guidance queued',
+          detail: guidance,
+        }])
+      } finally {
+        isSendingRef.current = false
+      }
+      return
+    }
+    isSendingRef.current = true
+    const outgoing = requestedMessage
     const userTimestamp = new Date().toISOString()
     const assistantMessageId = `${userTimestamp}-assistant`
     const userMessageId = `${userTimestamp}-user`
@@ -141,6 +252,7 @@ export default function ChatPage() {
       routing_skills: [],
     }
     streamingMessageIdRef.current = assistantMessageId
+    shouldAutoScrollRef.current = true
     isNewConversationRef.current = !activeId
     setMessages((prev) => [...prev, userMessage, assistantMessage])
     isStreamingRef.current = true
@@ -157,6 +269,7 @@ export default function ChatPage() {
         onEvent: async (event, payload) => {
           if (event === 'meta' && payload.conversation_id && !activeId) {
             streamingConversationIdRef.current = payload.conversation_id
+            setMessagesConversationId(payload.conversation_id)
             setConversations((prev) => upsertConversationItem(prev, {
               id: payload.conversation_id,
               first_question: outgoing,
@@ -166,7 +279,7 @@ export default function ChatPage() {
               last_update: userTimestamp,
               created_at: userTimestamp,
             }))
-            navigate(`/chat/${payload.conversation_id}`, { replace: true })
+            navigate(`/agent/${payload.conversation_id}`, { replace: true })
           }
           if (event === 'step') {
             setSteps((prev) => [...prev, payload])
@@ -220,6 +333,9 @@ export default function ChatPage() {
                   is_streaming: false,
                   timestamp: responseTimestamp,
                   routing_skills: payload.routing?.skills || [],
+                  agent_timeline: payload.agent_timeline || [],
+                  trace: payload.trace || [],
+                  skill_results: payload.skill_results || {},
                 }
               }))
             }
@@ -235,9 +351,26 @@ export default function ChatPage() {
             }
             await loadConversations()
           }
+          if (event === 'error') {
+            const assistantMessageId = streamingMessageIdRef.current
+            if (assistantMessageId) {
+              setMessages((prev) => prev.map((message) => (
+                message.id === assistantMessageId
+                  ? {
+                      ...message,
+                      content: payload.message || 'The request could not be completed.',
+                      is_streaming: false,
+                      error: true,
+                    }
+                  : message
+              )))
+            }
+            await loadConversations()
+          }
         },
       })
     } finally {
+      isSendingRef.current = false
       isStreamingRef.current = false
       streamingConversationIdRef.current = null
       streamingMessageIdRef.current = null
@@ -262,6 +395,32 @@ export default function ChatPage() {
   }, [conversations])
 
   const currentStep = steps[steps.length - 1] || null
+  const conversationEvidenceResults = useMemo(() => {
+    const merged = {}
+    messages.forEach((message) => {
+      if (message.role === 'assistant' && message.skill_results) Object.assign(merged, message.skill_results)
+    })
+    return merged
+  }, [messages])
+  const liveEvidenceResults = useMemo(() => {
+    const merged = { ...conversationEvidenceResults }
+    steps.forEach((step) => {
+      if (step.kind === 'tool' && step.debug && typeof step.debug === 'object') Object.assign(merged, step.debug)
+    })
+    return merged
+  }, [conversationEvidenceResults, steps])
+  const visibleEvidenceResults = messagesConversationId === activeId ? liveEvidenceResults : {}
+  const pendingApproval = useMemo(() => {
+    for (const step of [...steps].reverse()) {
+      const approval = findApproval(step.debug)
+      if (approval && !resolvedApprovalTokens.has(approval.authorization_token)) return approval
+    }
+    for (const message of [...messages].reverse()) {
+      const approval = findApproval(message.skill_results)
+      if (approval && !resolvedApprovalTokens.has(approval.authorization_token)) return approval
+    }
+    return null
+  }, [messages, resolvedApprovalTokens, steps])
   const activity = getActivityCopy(currentStep)
   const activityPhrases = getActivityPhrases(currentStep)
   const activityPhrase = activityPhrases[activityPhraseIndex % activityPhrases.length]
@@ -279,18 +438,80 @@ export default function ChatPage() {
     return () => window.clearInterval(timer)
   }, [busy, currentStep])
 
+  const runEndpointScan = () => {
+    if (busy) return
+    send('Perform a comprehensive defensive security assessment of this endpoint. Inspect host inventory, installed software and versions, vulnerability and CVE exposure, defensive posture, services, running processes, active connections, ARP/NDP neighbor integrity, routes, gateways, network interfaces, persistence mechanisms, and file integrity. Look for evidence of ARP spoofing or local network manipulation without treating an uncorroborated change as proof. Correlate all evidence, enrich suspicious network entities with the available threat-intelligence capabilities, continue with additional tools when observations create new questions, and provide a detailed risk analysis with coverage gaps and prioritized recommendations. Do not perform containment actions without my explicit authorization.')
+  }
+
+  const resolveApproval = (token) => {
+    setResolvedApprovalTokens((current) => {
+      const next = new Set([...current, token])
+      sessionStorage.setItem('securityclaw:resolved-approvals', JSON.stringify([...next]))
+      return next
+    })
+    setApprovalError('')
+  }
+
+  const denyPendingAction = async () => {
+    if (!pendingApproval || approvalBusy) return
+    setApprovalBusy(true)
+    setApprovalError('')
+    try {
+      if (activeId) await api.post('/api/actions/deny', { conversation_id: activeId, authorization_token: pendingApproval.authorization_token })
+      resolveApproval(pendingApproval.authorization_token)
+      if (activeId) await loadConversation(activeId)
+    } catch (error) {
+      setApprovalError(error.response?.data?.detail || error.message || 'The action could not be denied.')
+    } finally {
+      setApprovalBusy(false)
+    }
+  }
+
+  const approvePendingAction = async () => {
+    if (!pendingApproval || !activeId || approvalBusy) return
+    setApprovalBusy(true)
+    setApprovalError('')
+    try {
+      await api.post('/api/actions/approve', {
+        conversation_id: activeId,
+        skill: pendingApproval.skill,
+        action: pendingApproval.action,
+        arguments: pendingApproval.arguments || {},
+        authorization_token: pendingApproval.authorization_token,
+      })
+      resolveApproval(pendingApproval.authorization_token)
+      await loadConversation(activeId)
+      await loadConversations()
+    } catch (error) {
+      setApprovalError(error.response?.data?.detail || error.message || 'The action could not be authorized.')
+    } finally {
+      setApprovalBusy(false)
+    }
+  }
+
+  useEffect(() => {
+    const initialPrompt = location.state?.initialPrompt
+    if (!initialPrompt) return
+    setInput(initialPrompt)
+    navigate('/agent', { replace: true, state: null })
+  }, [location.state, navigate])
+
   return (
-    <div className="flex h-full min-h-0 gap-6">
-      <div className="panel flex w-80 flex-col overflow-hidden">
+    <div className="relative flex h-full min-h-0 overflow-hidden">
+      {conversationsOpen ? <div className="panel absolute inset-y-0 left-0 z-30 flex w-80 flex-col overflow-hidden shadow-2xl">
         <div className="border-b border-border p-4">
+          <div className="mb-3 flex items-center justify-between"><span className="font-mono text-xs uppercase tracking-[0.18em] text-cyan">Investigation history</span><button className="btn" type="button" onClick={() => setConversationsOpen(false)} aria-label="Close history"><X className="h-4 w-4" /></button></div>
           <button className="btn btn-primary w-full" onClick={newChat}>
             <Plus className="h-4 w-4" /> New Chat
+          </button>
+          <button className="btn mt-2 w-full" onClick={runEndpointScan} disabled={busy}>
+            <ScanSearch className="h-4 w-4" /> Scan endpoint
           </button>
         </div>
         <div className="min-h-0 flex-1 overflow-auto p-3 space-y-2">
           {orderedConversations.map((conv) => (
             <div key={conv.id} className={`rounded-xl border p-3 ${activeId === conv.id ? 'border-cyan bg-cyan/10' : 'border-border bg-panel2'}`}>
-              <button className="w-full text-left" onClick={() => navigate(`/chat/${conv.id}`)}>
+              <button className="w-full text-left" onClick={() => { setConversationsOpen(false); navigate(`/agent/${conv.id}`) }}>
                 <div className="truncate font-mono text-xs uppercase tracking-[0.14em] text-cyan">{conv.id}</div>
                 <div className="mt-1 line-clamp-2 text-sm text-text">{conv.first_question || conv.preview || 'Conversation'}</div>
                 <div className="mt-2 font-mono text-[11px] text-dim">{conv.messages} entries</div>
@@ -301,16 +522,44 @@ export default function ChatPage() {
             </div>
           ))}
         </div>
-      </div>
+      </div> : null}
 
-      <div className="flex min-w-0 flex-1 flex-col gap-6">
-        <PageHeader title="Chat" subtitle="Supervisor-driven operator console with step-level progress, not raw logs." />
+      <div className="relative flex min-w-0 flex-1 flex-col overflow-hidden bg-[#070d18]">
+        <div className="flex min-h-0 flex-1 flex-col overflow-hidden">
+          <Suspense fallback={<div className="p-6 text-sm text-dim">Loading evidence graph…</div>}><EvidenceGraph skillResults={visibleEvidenceResults} storageKey={activeId || 'new'} /></Suspense>
+        </div>
 
-        <div className="panel flex min-h-0 flex-1 flex-col overflow-hidden">
-          <div className="border-b border-border px-5 py-3 font-mono text-xs uppercase tracking-[0.18em] text-cyan">Conversation</div>
-          <div className="min-h-0 flex-1 space-y-4 overflow-auto p-5">
+        <div
+          className="absolute bottom-4 z-40 flex gap-2 transition-[left,right] duration-200"
+          style={{
+            left: conversationsOpen ? '21rem' : 'auto',
+            right: agentDrawerOpen ? 'min(46rem, calc(96vw + 1rem))' : '1rem',
+          }}
+        >
+          <button className={`btn shadow-xl ${conversationsOpen ? 'btn-primary' : ''}`} onClick={() => setConversationsOpen((value) => !value)}><History className="h-4 w-4" /> History</button>
+          <button className={`btn shadow-xl ${agentDrawerOpen ? 'btn-primary' : ''}`} onClick={() => setAgentDrawerOpen((value) => !value)}>{agentDrawerOpen ? <PanelRightClose className="h-4 w-4" /> : <PanelRightOpen className="h-4 w-4" />} Chat</button>
+        </div>
+
+        {agentDrawerOpen ? <div className="absolute inset-y-0 right-0 z-20 flex w-[min(720px,96%)] min-w-0 flex-col border-l border-border bg-panel shadow-2xl">
+          <div className="flex items-center justify-between border-b border-border px-5 py-3">
+            <div>
+              <div className="font-mono text-xs uppercase tracking-[0.18em] text-cyan">SecurityClaw Agent Chat</div>
+              <div className="mt-1 text-xs text-dim">ReAct investigation console · operator-guided · approval-gated actions</div>
+            </div>
+            <div className="flex gap-2">
+              <button className={`btn ${agentView === 'timeline' ? 'btn-primary' : ''}`} onClick={() => setAgentView('timeline')}><ListTree className="h-4 w-4" /> Timeline</button>
+              <button className={`btn ${agentView === 'insights' ? 'btn-primary' : ''}`} onClick={() => setAgentView('insights')}><BarChart3 className="h-4 w-4" /> Insights</button>
+              <button className="btn" onClick={() => setAgentDrawerOpen(false)} aria-label="Close Agent"><PanelRightClose className="h-4 w-4" /></button>
+            </div>
+          </div>
+          {agentView === 'insights' ? <Suspense fallback={<div className="p-6 text-sm text-dim">Loading insights…</div>}><EndpointInsights messages={messages} liveSteps={steps} /></Suspense> : null}
+          <div
+            ref={messagesContainerRef}
+            className={`min-h-0 flex-1 space-y-4 overflow-auto p-5 ${agentView !== 'timeline' ? 'hidden' : ''}`}
+            onScroll={handleMessagesScroll}
+          >
             {messages.length === 0 ? <div className="font-mono text-dim">Start a new investigation.</div> : null}
-            {messages.filter(m => !m.is_streaming).map((message) => (
+            {messages.map((message) => (
               <div key={message.id || message.timestamp} className={`rounded-xl border p-4 ${message.role === 'assistant' ? 'border-cyan/20 bg-cyan/5' : 'border-border bg-panel2'}`}>
                 <div className="mb-2 flex items-center justify-between gap-3">
                   <div className="font-mono text-xs uppercase tracking-[0.18em] text-dim">{message.role === 'assistant' ? 'SecurityClaw' : 'Operator'}</div>
@@ -323,11 +572,19 @@ export default function ChatPage() {
                   </div>
                 ) : null}
                 {message.role === 'assistant' ? (
-                  <div className={`markdown text-sm text-text ${message.thought_content ? 'mt-3' : ''}`}>
-                    <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                  <div className={`markdown text-base leading-7 text-text ${message.thought_content ? 'mt-3' : ''}`}>
+                    <AgentTimeline items={message.agent_timeline || []} />
+                    {message.content ? (
+                      <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
+                    ) : message.is_streaming ? (
+                      <span className="font-mono text-xs text-dim">Waiting for response…</span>
+                    ) : null}
+                    {message.is_streaming && message.content ? (
+                      <span className="ml-1 inline-block h-4 w-1.5 animate-pulse bg-cyan align-middle" aria-label="Streaming response" />
+                    ) : null}
                   </div>
                 ) : (
-                  <div className="markdown text-sm text-text">
+                  <div className="markdown text-base leading-7 text-text">
                     <ReactMarkdown remarkPlugins={[remarkGfm]}>{message.content}</ReactMarkdown>
                   </div>
                 )}
@@ -362,6 +619,17 @@ export default function ChatPage() {
                           <div key={`${step.kind}-${index}`} className="rounded-xl border border-border/70 bg-panel2 px-3 py-3">
                             <div className="font-mono text-[11px] uppercase tracking-[0.16em] text-cyan">{step.label}</div>
                             <div className="mt-1 text-sm text-text">{step.detail}</div>
+                            {step.skills?.length ? (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {step.skills.map((skill) => <span key={skill} className="badge badge-green">{skill}</span>)}
+                              </div>
+                            ) : null}
+                            {step.debug ? (
+                              <details className="mt-3">
+                                <summary className="cursor-pointer font-mono text-[11px] uppercase tracking-[0.14em] text-dim">Debug output</summary>
+                                <pre className="mt-2 max-h-72 overflow-auto whitespace-pre-wrap rounded-lg bg-black/20 p-3 text-xs text-dim">{JSON.stringify(step.debug, null, 2)}</pre>
+                              </details>
+                            ) : null}
                           </div>
                         ))}
                       </div>
@@ -372,21 +640,37 @@ export default function ChatPage() {
             ) : null}
             <div ref={messagesEndRef} />
           </div>
-          <div className="border-t border-border p-4">
-            <div className="flex flex-col gap-2">
+          <div className="border-t border-border p-3">
+            <div className="flex items-end gap-2">
               <textarea
-                className="textarea min-h-24 flex-1"
+                className="textarea min-h-16 flex-1 resize-y"
                 placeholder="Ask SecurityClaw to investigate, query, compare, or triage... Press Enter to send, Shift+Enter for new line"
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
               />
-              <button className="btn btn-primary self-start" onClick={send} disabled={busy || !input.trim()}>
-                <Send className="h-4 w-4" /> {busy ? activityPhrase.toUpperCase() : 'SEND'}
+              <button className="btn btn-primary shrink-0" onClick={send} disabled={!input.trim()}>
+                <Send className="h-4 w-4" /> {busy ? 'GUIDE' : 'SEND'}
               </button>
             </div>
           </div>
-        </div>
+        </div> : null}
+
+        {pendingApproval ? <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/70 p-6 backdrop-blur-sm">
+          <section className="panel w-full max-w-lg border-amber-400/40 p-5 shadow-2xl" role="dialog" aria-modal="true" aria-labelledby="action-approval-title">
+            <div className="font-mono text-xs uppercase tracking-[0.18em] text-amber-300">Operator approval required</div>
+            <h2 id="action-approval-title" className="mt-2 text-xl font-semibold text-text">Allow {String(pendingApproval.action || 'defensive action').replaceAll('_', ' ')}?</h2>
+            <p className="mt-2 text-sm leading-6 text-dim">SecurityClaw will execute this privileged action once. The approval is short-lived and bound to the exact parameters below; the LLM cannot approve it.</p>
+            <dl className="mt-4 divide-y divide-border rounded-xl border border-border bg-black/20">
+              {Object.entries(pendingApproval.arguments || {}).map(([key, value]) => <div key={key} className="grid grid-cols-[120px_1fr] gap-3 p-3 text-sm"><dt className="font-mono text-cyan">{key}</dt><dd className="break-all text-text">{String(value)}</dd></div>)}
+            </dl>
+            {approvalError ? <div className="mt-4 rounded-lg border border-danger/40 bg-danger/10 p-3 text-sm text-danger">{approvalError}</div> : null}
+            <div className="mt-5 flex justify-end gap-3">
+              <button className="btn" type="button" disabled={approvalBusy} onClick={denyPendingAction}>Deny</button>
+              <button className="btn btn-primary" type="button" disabled={approvalBusy || !activeId} onClick={approvePendingAction}>{approvalBusy ? 'EXECUTING' : 'APPROVE ONCE'}</button>
+            </div>
+          </section>
+        </div> : null}
       </div>
     </div>
   )

@@ -18,14 +18,30 @@ db:
   verify_certs: false
   # Credentials loaded from .env: DB_USERNAME, DB_PASSWORD
 llm:
+  # ollama | openai | chatgpt | openai_compatible | anthropic | claude_api |
+  # codex_cli | claude_cli. Endpoints, models, and credentials can be overridden
+  # in .env without placing secrets in this file.
   provider: ollama
   ollama_base_url: http://localhost:11434
   # Current example runtime models:
   ollama_model: qwen2.5:7b-instruct-q4_K_M
   # Lightweight local model used in the current example config for auxiliary tasks.
   ollama_embed_model: nomic-embed-text:latest
+  # Remote and CLI provider settings can be supplied through .env:
+  # OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL, ANTHROPIC_API_KEY,
+  # ANTHROPIC_BASE_URL, ANTHROPIC_MODEL, CODEX_CLI_PATH, CLAUDE_CLI_PATH.
   temperature: 0.2
-  max_tokens: 65536
+  # Disable hidden reasoning by default to reduce local latency.
+  think: false
+  max_tokens: 4096
+  # Context is independent from the maximum generated response length.
+  context_window: 16384
+  # Local generation may take several minutes, especially for reasoning models.
+  request_timeout_seconds: 600
+  embedding_timeout_seconds: 120
+chat:
+  # Allows multi-stage investigations while retaining a finite safety bound.
+  supervisor_max_steps: 6
 memory:
   query_repair_max_repairs: 128
   query_repair_max_field_types: 512
@@ -37,8 +53,22 @@ anomaly:
   poll_interval_seconds: 60
   severity_threshold: 0.7
   max_findings_per_poll: 50
+endpoint:
+  # Local service traffic is excluded from passive endpoint alerts. The
+  # configured database and local LLM ports are added automatically.
+  owned_service_ports: [7799]
+graph_enrichment:
+  # Generate brief node analysis from local evidence and configured security APIs.
+  enabled: true
+  # DuckDuckGo Instant Answers are a last resort after specialist sources.
+  duckduckgo_fallback: true
+  external_timeout_seconds: 6
 geoip:
   enabled: true
+  # Provider selection is automatic: prefer the local MaxMind MMDB when
+  # available, otherwise use IPinfo Lite for country/continent/ASN enrichment.
+  provider: auto
+  ipinfo_url: https://api.ipinfo.io/lite
   # Local path where GeoLite2-City.mmdb will be stored
   db_path: data/geoip/GeoLite2-City.mmdb
   # MaxMind edition ID to download
@@ -49,4 +79,4 @@ geoip:
   # MaxMind official API endpoint for downloads
   download_url: https://download.maxmind.com/app/geoip_download
   timeout_seconds: 60
-  # License key loaded from .env: MAXMIND_LICENSE_KEY
+  # Credentials loaded from .env: MAXMIND_LICENSE_KEY and/or IPINFO_TOKEN

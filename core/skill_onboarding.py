@@ -106,6 +106,9 @@ def get_missing_skill_variables() -> dict[str, list[str]]:
         missing_vars = []
         for var_name, var_spec in var_specs.items():
             env_key = var_spec.get("env_key", var_name)
+            alternatives = var_spec.get("alternatives", [])
+            if alternatives and any(os.getenv(key) for key in alternatives):
+                continue
             if not os.getenv(env_key):
                 missing_vars.append(var_name)
 
