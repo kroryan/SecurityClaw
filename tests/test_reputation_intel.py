@@ -231,6 +231,12 @@ class TestDomainReputation:
         mock_get.return_value = mock_resp
 
         result = get_domain_reputation("malicious.com")
+
+        assert any(
+            call.args[0]
+            == "https://otx.alienvault.com/api/v1/indicators/domain/malicious.com/general"
+            for call in mock_get.call_args_list
+        )
         
         assert result["domain"] == "malicious.com"
         assert "alienvault" in result
@@ -238,6 +244,35 @@ class TestDomainReputation:
         # 3 pulses: > 2 but <=5, so "suspicious"
         assert result["alienvault"]["reputation"] == "suspicious"
         assert "alienvault" in result["queries"]
+
+    @patch("skills.threat_analyst.reputation_intel.ALIENVAULT_KEY", "test-key")
+    @patch("skills.threat_analyst.reputation_intel.requests.get")
+    def test_alienvault_ip_uses_ipv4_endpoint(self, mock_get):
+        from skills.threat_analyst.reputation_intel import _query_alienvault
+
+        mock_resp = Mock()
+        mock_resp.json.return_value = {"pulse_info": {"pulses": []}}
+        mock_resp.raise_for_status = Mock()
+        mock_get.return_value = mock_resp
+
+        _query_alienvault("8.8.8.8", "ip")
+        assert (
+            mock_get.call_args.args[0]
+            == "https://otx.alienvault.com/api/v1/indicators/IPv4/8.8.8.8/general"
+        )
+
+    @patch("skills.threat_analyst.reputation_intel.VIRUSTOTAL_KEY", "test-key")
+    @patch("skills.threat_analyst.reputation_intel.requests.get")
+    def test_virustotal_ip_uses_v3_ip_addresses_endpoint(self, mock_get):
+        from skills.threat_analyst.reputation_intel import _query_virustotal
+
+        mock_resp = Mock()
+        mock_resp.json.return_value = {"data": {"attributes": {"last_analysis_stats": {}}}}
+        mock_resp.raise_for_status = Mock()
+        mock_get.return_value = mock_resp
+
+        _query_virustotal("8.8.8.8", "ip")
+        assert mock_get.call_args.args[0] == "https://www.virustotal.com/api/v3/ip_addresses/8.8.8.8"
 
     @patch("skills.threat_analyst.reputation_intel.ALIENVAULT_KEY", "")
     def test_alienvault_skipped_without_key(self):

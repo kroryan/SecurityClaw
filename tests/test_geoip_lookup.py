@@ -25,11 +25,15 @@ class _Cfg:
 
 
 class _Response:
-    def __init__(self, content: bytes):
+    def __init__(self, content: bytes = b"", json_data: dict | None = None):
         self.content = content
+        self._json_data = json_data or {}
 
     def raise_for_status(self):
         return None
+
+    def json(self):
+        return self._json_data
 
 
 class _Reader:
@@ -143,11 +147,42 @@ def test_weekly_run_updates_stale_database(monkeypatch, tmp_path):
 
 def test_missing_license_and_missing_database_returns_error(tmp_path):
     db_path = tmp_path / "GeoLite2-City.mmdb"
+    cfg = _Cfg(db_path, license_key=None)
+    cfg.values[("geoip", "ipinfo_token")] = ""
 
-    result = run({"config": _Cfg(db_path, license_key=None), "parameters": {"ip": "8.8.8.8"}, "memory": None})
+    result = run({"config": cfg, "parameters": {"ip": "8.8.8.8"}, "memory": None})
 
     assert result["status"] == "error"
     assert "MAXMIND_LICENSE_KEY" in result["error"]
+
+
+def test_ipinfo_lite_fallback_returns_stable_partial_geo(monkeypatch, tmp_path):
+    cfg = _Cfg(tmp_path / "missing.mmdb", license_key=None)
+    cfg.values[("geoip", "ipinfo_token")] = "test-token"
+    cfg.values[("geoip", "ipinfo_url")] = "https://api.ipinfo.io/lite"
+
+    def _fake_get(url, headers, timeout):
+        assert url == "https://api.ipinfo.io/lite/8.8.8.8"
+        assert headers == {"Authorization": "Bearer test-token"}
+        return _Response(json_data={
+            "ip": "8.8.8.8",
+            "asn": "AS15169",
+            "as_name": "Google LLC",
+            "as_domain": "google.com",
+            "country_code": "US",
+            "country": "United States",
+            "continent_code": "NA",
+            "continent": "North America",
+        })
+
+    monkeypatch.setattr("skills.geoip_lookup.logic.requests.get", _fake_get)
+    result = run({"config": cfg, "parameters": {"ip": "8.8.8.8"}, "memory": None})
+
+    assert result["status"] == "ok"
+    assert result["provider"] == "ipinfo_lite"
+    assert result["geo"]["country"] == "United States"
+    assert result["geo"]["asn"] == "AS15169"
+    assert result["geo"]["city"] is None
 
 
 def test_geoip_lookup_uses_previous_results_for_followup_country_question(monkeypatch, tmp_path):

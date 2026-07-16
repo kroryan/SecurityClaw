@@ -4,6 +4,7 @@
 ## Get latest from https://github.com/github/gitignore/blob/main/VisualStudio.gitignore
 
 # User-specific files
+guia.md
 *.rsuser
 *.suo
 *.user
@@ -13,6 +14,8 @@
 config.yaml
 data/agent_memory.json
 data/.startup_complete
+data/graph_enrichment_cache.json
+data/graph_enrichment_cache.tmp
 .coverage
 htmlcov/
 

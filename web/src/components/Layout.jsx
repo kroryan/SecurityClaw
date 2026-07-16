@@ -1,11 +1,12 @@
-import { NavLink } from 'react-router-dom'
-import { Activity, Bot, Clock3, Cpu, RefreshCw, Settings, Shield } from 'lucide-react'
+import { NavLink, useLocation } from 'react-router-dom'
+import { Activity, BellRing, Bot, Clock3, Cpu, RefreshCw, Settings, Shield } from 'lucide-react'
 import { api } from '../lib/api.js'
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 
 const links = [
   { to: '/status', label: 'STATUS', icon: Activity },
-  { to: '/chat', label: 'CHAT', icon: Bot },
+  { to: '/agent', label: 'AGENT', icon: Bot },
+  { to: '/alerts', label: 'ALERTS', icon: BellRing },
   { to: '/skills', label: 'SKILLS', icon: Cpu },
   { to: '/config', label: 'CONFIG', icon: Settings },
   { to: '/crons', label: 'CRONS', icon: Clock3 },
@@ -13,6 +14,15 @@ const links = [
 
 export default function Layout({ children }) {
   const [busy, setBusy] = useState(false)
+  const [unreadAlerts, setUnreadAlerts] = useState(0)
+  const location = useLocation()
+  const isChatRoute = location.pathname === '/agent' || location.pathname.startsWith('/agent/')
+  useEffect(() => {
+    const load = () => api.get('/api/alerts').then((response) => setUnreadAlerts(response.data.unread || 0)).catch(() => {})
+    load()
+    const timer = window.setInterval(load, 5000)
+    return () => window.clearInterval(timer)
+  }, [])
 
   const restart = async () => {
     setBusy(true)
@@ -52,6 +62,7 @@ export default function Layout({ children }) {
             >
               <Icon className="h-4 w-4" />
               <span>{label}</span>
+              {to === '/alerts' && unreadAlerts ? <span className="ml-auto rounded-full bg-danger px-2 py-0.5 text-[10px] text-white">{unreadAlerts}</span> : null}
             </NavLink>
           ))}
         </nav>
@@ -65,11 +76,13 @@ export default function Layout({ children }) {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 items-center justify-between border-b border-border bg-panel px-6">
-          <div className="font-mono text-xs uppercase tracking-[0.22em] text-dim">Autonomous SOC Operations Interface</div>
-          <div className="badge badge-green">online</div>
-        </header>
-        <div className="min-h-0 flex-1 overflow-auto p-6">{children}</div>
+        {!isChatRoute ? (
+          <header className="flex h-14 items-center justify-between border-b border-border bg-panel px-6">
+            <div className="font-mono text-xs uppercase tracking-[0.22em] text-dim">Autonomous SOC Operations Interface</div>
+            <div className="badge badge-green">online</div>
+          </header>
+        ) : null}
+        <div className={`min-h-0 flex-1 ${isChatRoute ? 'overflow-hidden' : 'overflow-auto p-6'}`}>{children}</div>
       </div>
     </div>
   )
